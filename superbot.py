@@ -88,6 +88,7 @@ class PerformanceDB:
     def add_active_trade(self, symbol, direction, entry_price, stop_loss):
         risk = abs(entry_price - stop_loss)
         self.data["active_trades"][symbol] = {
+            "symbol": symbol,  # DÜZELTİLDİ: Sembol artık kaydediliyor
             "direction": direction,
             "entry": entry_price,
             "stop": stop_loss,
@@ -397,7 +398,7 @@ class SMCTradingBot:
             df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             return df
         except Exception as e:
-			# Render / Binance IP kısıtlamalarına karşı alternatif MEXC yedek desteği
+            # Render / Binance IP kısıtlamalarına karşı alternatif MEXC yedek desteği
             try:
                 mexc_symbol = symbol.replace("USDT", "_USDT")
                 mexc_url = f"https://api.mexc.com/api/v3/klines?symbol={mexc_symbol}&interval={timeframe}&limit={limit}"
@@ -479,7 +480,7 @@ class SMCTradingBot:
                     mtf_scores=mtf_scores
                 )
 
-                entry_price = df_4h_analyzon = df_4h_analyzed['close'].iloc[-1]
+                entry_price = df_4h_analyzed['close'].iloc[-1]  # DÜZELTİLDİ: Yazım hatası giderildi
                 stop_price = entry_price * 0.98 if direction == 'LONG' else entry_price * 1.02
                 self.db.add_active_trade(symbol, direction, entry_price, stop_price)
 
@@ -488,7 +489,7 @@ class SMCTradingBot:
 
     def start(self):
         logging.info("SMC Trading Bot Başlatıldı. Render ortamında çalışıyor...")
-        while True:
+        while Type := True:
             try:
                 self.run_scan()
             except Exception as e:
