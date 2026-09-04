@@ -1,18 +1,5 @@
-"""
-SMC (Smart Money Concepts) & MTF Trading Telegram Bot
------------------------------------------------------
-Tam Donanımlı Production-Ready Python Botu
-Özellikler:
- 1. CCXT ile Binance/Çoklu Borsa Verisi Çekme (1D, 4H, 1H)
- 2. SMC Tespiti (BOS, CHoCH, Liquidity Sweep, SFP, Order Block, Breaker Block, FVG)
- 3. Teknik İndikatörler (RSI 14, MA 50, MA 100, MA 200)
- 4. Detaylı MTF Skorlama Motoru (Maksimum 20 Puan)
- 5. Matplotlib / Mplfinance ile Otomatik Mum Grafiği Oluşturma
- 6. Telegram Zengin Sinyal Mesajı (Görsel + Metin)
- 7. R-Katı ve Pozisyon Takip Motoru (+1R BE - Stop Girişe Çek Bildirimi)
- 8. Kalıcı Veritabanı (trades_db.json) ile Coin Sınıflandırma (ELE / RİSKLİ / GÜÇLÜ)
- 9. Render ve GitHub Uyumlu (Background Worker, Environment Variables)
-"""
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
 import os
 import sys
@@ -20,8 +7,10 @@ import time
 import json
 import logging
 import io
+import threading
 from datetime import datetime
 import requests
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import matplotlib
 matplotlib.use('Agg')  # Sunucuda headless grafik çizimi için
@@ -31,6 +20,30 @@ import mplfinance as mpf
 import ccxt
 import pandas as pd
 import numpy as np
+
+# =========================================================
+# 0. RENDER & UPTIMEROBOT İÇİN DAHİLİ HTTP SUNUCUSU
+# =========================================================
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"SMC Trading Bot is alive and running!")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        return  # Konsol log kirliliğini önler
+
+def start_health_check_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server.serve_forever()
+
+# Arka planda web sunucusunu başlat (Render zaman aşımı / uyku modunu engeller)
+threading.Thread(target=start_health_check_server, daemon=True).start()
 
 # =========================================================
 # LOGGING VE KONFİGÜRASYON
@@ -369,7 +382,7 @@ class SMCTradingBot:
     def __init__(self):
         self.exchange = ccxt.binance({
             'enableRateLimit': True,
-            'options': {'defaultType': 'future'} # Futures veya Spot
+            'options': {'defaultType': 'future'}
         })
         self.db = PerformanceDB()
         self.telegram = TelegramNotifier(BOT_TOKEN, CHAT_ID)
@@ -384,7 +397,19 @@ class SMCTradingBot:
             df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             return df
         except Exception as e:
-            logging.error(f"{symbol} {timeframe} veri çekme hatası: {e}")
+			# Render / Binance IP kısıtlamalarına karşı alternatif MEXC yedek desteği
+            try:
+                mexc_symbol = symbol.replace("USDT", "_USDT")
+                mexc_url = f"https://api.mexc.com/api/v3/klines?symbol={mexc_symbol}&interval={timeframe}&limit={limit}"
+                res = requests.get(mexc_url, timeout=10)
+                data = res.json()
+                if isinstance(data, list) and len(data) > 0:
+                    formatted_data = []
+                    for row in data:
+                        formatted_data.append([row[0], float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5])])
+                    return pd.DataFrame(formatted_data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            except Exception as me:
+                logging.error(f"{symbol} {timeframe} veri çekme hatası (MEXC yedek de başarısız): {me}")
             return None
 
     def check_active_positions(self):
@@ -408,7 +433,7 @@ class SMCTradingBot:
                 self.telegram.send_be_alert(symbol, direction, entry)
                 self.db.mark_be_notified(symbol)
 
-            # Otomatik Kapanma Takibi (Örnek: Stop veya Target)
+            # Otomatik Kapanma Takibi
             if direction == 'LONG' and current_price <= trade['stop']:
                 self.db.close_trade(symbol, current_price, "STOP_HIT")
             elif direction == 'SHORT' and current_price >= trade['stop']:
@@ -419,11 +444,9 @@ class SMCTradingBot:
     def run_scan(self):
         logging.info(">>> SMC Taraması Başlatılıyor...")
         
-        # Sınıflandırılmış elenen coinleri filtrele
         coin_stats = self.db.get_coin_stats()
 
         for symbol in self.symbols:
-            # ELE kategorisindeki coinleri atla
             if symbol in coin_stats and "🔴 ELE" in coin_stats[symbol]['status']:
                 logging.info(f"{symbol} elendiği için taranmıyor.")
                 continue
@@ -435,14 +458,12 @@ class SMCTradingBot:
             if df_4h is None or len(df_4h) < 50:
                 continue
 
-            # Skorlama
             score_1d, _, _ = SMCAnalyzer.analyze_timeframe(df_1d, '1D') if df_1d is not None else (10.0, [], None)
             score_4h, criterias, df_4h_analyzed = SMCAnalyzer.analyze_timeframe(df_4h, '4H')
             score_1h, _, _ = SMCAnalyzer.analyze_timeframe(df_1h, '1H') if df_1h is not None else (10.0, [], None)
 
-            total_score = score_4h + 2.0  # +2.0 MTF bonus
+            total_score = score_4h + 2.0  # MTF bonus
 
-            # Eğer Skor Belirlenen Eşiği Geçerse (Örn: 13.5)
             if total_score >= SCORE_THRESHOLD:
                 direction = "LONG" if df_4h_analyzed['close'].iloc[-1] > df_4h_analyzed['ma200'].iloc[-1] else "SHORT"
                 
@@ -458,13 +479,10 @@ class SMCTradingBot:
                     mtf_scores=mtf_scores
                 )
 
-                # Pozisyon Takibine Kaydet
-                entry_price = df_4h_analyzed['close'].iloc[-1]
-                # %2 Stop Mesafesi Varsayılan
+                entry_price = df_4h_analyzon = df_4h_analyzed['close'].iloc[-1]
                 stop_price = entry_price * 0.98 if direction == 'LONG' else entry_price * 1.02
                 self.db.add_active_trade(symbol, direction, entry_price, stop_price)
 
-        # Aktif Pozisyonları İzle
         self.check_active_positions()
         logging.info("<<< Tarama Tamamlandı.")
 
@@ -484,4 +502,3 @@ class SMCTradingBot:
 if __name__ == "__main__":
     bot = SMCTradingBot()
     bot.start()
-
