@@ -42,7 +42,7 @@ def start_health_check_server():
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server.serve_forever()
 
-# Arka planda web sunucusunu başlat (Render zaman aşımı / uyku modunu engeller)
+# Arka planda web sunucusunu başlat (Render uyku modunu engeller)
 threading.Thread(target=start_health_check_server, daemon=True).start()
 
 # =========================================================
@@ -58,7 +58,6 @@ logging.basicConfig(
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 CHAT_ID = os.getenv("CHAT_ID", "YOUR_CHAT_ID_HERE")
 SCAN_INTERVAL_MINUTES = int(os.getenv("SCAN_INTERVAL", "15"))
-SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "13.5"))
 DB_FILE = os.getenv("DB_FILE", "trades_db.json")
 
 # =========================================================
@@ -88,7 +87,7 @@ class PerformanceDB:
     def add_active_trade(self, symbol, direction, entry_price, stop_loss):
         risk = abs(entry_price - stop_loss)
         self.data["active_trades"][symbol] = {
-            "symbol": symbol,  # DÜZELTİLDİ: Sembol artık kaydediliyor
+            "symbol": symbol,  # Sembol kaydı güvenceye alındı
             "direction": direction,
             "entry": entry_price,
             "stop": stop_loss,
@@ -125,7 +124,6 @@ class PerformanceDB:
             self._save()
 
     def get_coin_stats(self):
-        """Coin bazında performans sınıflandırması (ELE / RISKLI / GÜÇLÜ)"""
         stats = {}
         for trade in self.data.get("closed_trades", []):
             symbol = trade.get("symbol", "UNKNOWN")
@@ -160,13 +158,11 @@ class PerformanceDB:
 class SMCAnalyzer:
     @staticmethod
     def add_indicators(df):
-        """RSI ve Hareketli Ortalamaları Hesaplar"""
         df = df.copy()
         df['ma50'] = df['close'].rolling(50).mean()
         df['ma100'] = df['close'].rolling(100).mean()
         df['ma200'] = df['close'].rolling(200).mean()
 
-        # RSI 14
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -176,7 +172,6 @@ class SMCAnalyzer:
 
     @classmethod
     def analyze_timeframe(cls, df, timeframe_name="4H"):
-        """SMC ve Price Action Kurallarını Detaylıca İnceleyip Skorlar"""
         df = cls.add_indicators(df)
         criterias = []
         score = 0.0
@@ -186,11 +181,8 @@ class SMCAnalyzer:
 
         last = df.iloc[-1]
         prev1 = df.iloc[-2]
-
-        # Trend Yönü Tespiti
         is_bullish = last['close'] > last['ma200']
 
-        # 1. Structure / BOS & CHoCH
         recent_high = df['high'].iloc[-15:-1].max()
         recent_low = df['low'].iloc[-15:-1].min()
 
@@ -205,7 +197,6 @@ class SMCAnalyzer:
             score += 1.35
             criterias.append("• CHoCH: 1.35 — Bearish Change of Character")
 
-        # 2. Liquidity Sweep & SFP
         lowest_10 = df['low'].iloc[-12:-2].min()
         highest_10 = df['high'].iloc[-12:-2].max()
 
@@ -220,7 +211,6 @@ class SMCAnalyzer:
             score += 1.35
             criterias.append("• SFP: 1.35 — Bearish Swing Failure Pattern")
 
-        # 3. Order Block & Breaker Block
         if is_bullish and last['close'] > prev1['high'] and prev1['close'] < prev1['open']:
             score += 1.57
             criterias.append("• Order Block: 1.57 — Bullish Order Block active")
@@ -232,7 +222,6 @@ class SMCAnalyzer:
             score += 1.12
             criterias.append("• Breaker Block: 1.12 — Bearish Breaker confirmed")
 
-        # 4. FVG (Fair Value Gap)
         if is_bullish and df['low'].iloc[-1] > df['high'].iloc[-3]:
             score += 1.35
             criterias.append("• FVG: 1.35 — Bullish Fair Value Gap")
@@ -240,7 +229,6 @@ class SMCAnalyzer:
             score += 1.35
             criterias.append("• FVG: 1.35 — Bearish Fair Value Gap")
 
-        # 5. RSI Göstergesi
         rsi_val = last['rsi']
         if is_bullish and rsi_val > 50:
             score += 1.12
@@ -249,7 +237,6 @@ class SMCAnalyzer:
             score += 1.12
             criterias.append(f"• RSI: 1.12 — RSI {rsi_val:.1f} bearish momentum")
 
-        # 6. Hareketli Ortalamalar (MA 200, 100, 50)
         if last['close'] > last['ma200']:
             score += 1.35
             criterias.append("• MA 200: 1.35 — Price above MA200")
@@ -259,7 +246,7 @@ class SMCAnalyzer:
 
         if last['ma50'] > last['ma100']:
             score += 0.90
-            criterias.append("• MA 100: 0.90 — MA50 above MA100 (bullish cross)")
+            criterias.append("• MA 100: 0.90 — MA50 above MA100")
         else:
             score += 0.90
             criterias.append("• MA 100: 0.90 — MA50 below MA100")
@@ -274,7 +261,6 @@ class SMCAnalyzer:
 # 3. GRAFİK GÖRSELLEŞTİRME KÜTÜPHANESİ
 # =========================================================
 def create_chart_image(df, symbol):
-    """Mplfinance ile Binance tarzı mum grafiği çizer"""
     df_chart = df.iloc[-60:].copy()
     df_chart['timestamp'] = pd.to_datetime(df_chart['timestamp'], unit='ms')
     df_chart.set_index('timestamp', inplace=True)
@@ -313,7 +299,6 @@ class TelegramNotifier:
     def send_signal(self, symbol, direction, base_score, criterias, chart_buf, mtf_scores):
         mtf_bonus = 2.00
         total_score = base_score + mtf_bonus
-
         crit_text = "\n".join(criterias) if criterias else "• Standart SMC kurulumu tespit edildi."
 
         caption = f"""🧠 **{symbol} — {direction}**
@@ -328,7 +313,7 @@ class TelegramNotifier:
 • 4H: {direction} ({mtf_scores['4h']:.2f}/18)
 • 1H: {direction} ({mtf_scores['1h']:.2f}/18)
 
-⚠️ Bu bot yalnızca teknik/algoritmik analiz üretir; garanti edilmiş fiyat hareketi veya yatırım tavsiyesi değildir."""
+⚠️ Bu bot yalnızca teknik/algoritmik analiz üretir; yatırım tavsiyesi değildir."""
 
         url = f"{self.api_url}/sendPhoto"
         files = {'photo': ('chart.png', chart_buf, 'image/png')}
@@ -359,23 +344,6 @@ class TelegramNotifier:
         except Exception as e:
             logging.error(f"BE Telegram hatası: {e}")
 
-    def send_performance_report(self, stats_dict):
-        if not stats_dict:
-            return
-
-        lines = ["📊 **COIN PERFORMANS VE ELEME RAPORU**", "───────────────────────"]
-        for sym, data in stats_dict.items():
-            lines.append(f"• **{sym}**: {data['status']}")
-            lines.append(f"   └ İşlem: {data['count']} | Ort R: {data['avg_r']} | Toplam R: {data['total_r']}")
-
-        text = "\n".join(lines)
-        url = f"{self.api_url}/sendMessage"
-        data = {'chat_id': self.chat_id, 'text': text, 'parse_mode': 'Markdown'}
-        try:
-            requests.post(url, data=data, timeout=10)
-        except Exception as e:
-            logging.error(f"Rapor hatası: {e}")
-
 # =========================================================
 # 5. ANA ÇALIŞMA VE TARAMA DÖNGÜSÜ
 # =========================================================
@@ -391,6 +359,10 @@ class SMCTradingBot:
             'ETH/USDT', 'BTC/USDT', 'SOL/USDT', 'ACE/USDT', 
             'DYM/USDT', 'AVAX/USDT', 'NEAR/USDT', 'LINK/USDT'
         ]
+        
+        # İLK ÇALIŞTIRMA KONTROLÜ İÇİN BAYRAKLAR
+        self.is_first_run = True
+        self.default_threshold = float(os.getenv("SCORE_THRESHOLD", "13.5"))
 
     def fetch_ohlcv(self, symbol, timeframe, limit=100):
         try:
@@ -398,7 +370,6 @@ class SMCTradingBot:
             df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             return df
         except Exception as e:
-            # Render / Binance IP kısıtlamalarına karşı alternatif MEXC yedek desteği
             try:
                 mexc_symbol = symbol.replace("USDT", "_USDT")
                 mexc_url = f"https://api.mexc.com/api/v3/klines?symbol={mexc_symbol}&interval={timeframe}&limit={limit}"
@@ -410,11 +381,10 @@ class SMCTradingBot:
                         formatted_data.append([row[0], float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5])])
                     return pd.DataFrame(formatted_data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             except Exception as me:
-                logging.error(f"{symbol} {timeframe} veri çekme hatası (MEXC yedek de başarısız): {me}")
+                logging.error(f"{symbol} {timeframe} veri çekme hatası: {me}")
             return None
 
     def check_active_positions(self):
-        """Aktif pozisyonları kontrol eder ve +1R kar oluşunca BE uyarısı atar"""
         active_trades = self.db.get_active_trades()
         for symbol, trade in list(active_trades.items()):
             df_1h = self.fetch_ohlcv(symbol, '1h', limit=5)
@@ -429,12 +399,10 @@ class SMCTradingBot:
             pnl = (current_price - entry) if direction == 'LONG' else (entry - current_price)
             r_multiple = pnl / risk if risk > 0 else 0
 
-            # +1R Kara Geçti ve Henüz BE Bildirimi Atılmadıysa
             if r_multiple >= 1.0 and not trade['be_notified']:
                 self.telegram.send_be_alert(symbol, direction, entry)
                 self.db.mark_be_notified(symbol)
 
-            # Otomatik Kapanma Takibi
             if direction == 'LONG' and current_price <= trade['stop']:
                 self.db.close_trade(symbol, current_price, "STOP_HIT")
             elif direction == 'SHORT' and current_price >= trade['stop']:
@@ -445,6 +413,15 @@ class SMCTradingBot:
     def run_scan(self):
         logging.info(">>> SMC Taraması Başlatılıyor...")
         
+        # İlk açılışta 5.0 eşiği, sonraki döngülerde normal eşik (örn: 13.5)
+        if self.is_first_run:
+            active_threshold = 5.0
+            logging.info(f"🧪 [İLK ÇALIŞTIRMA TESTİ] Skor eşiği geçici olarak {active_threshold} yapıldı.")
+            self.is_first_run = False
+        else:
+            active_threshold = self.default_threshold
+            logging.info(f"🔄 [DÖNGÜ] Normal skor eşiği kullanılıyor: {active_threshold}")
+
         coin_stats = self.db.get_coin_stats()
 
         for symbol in self.symbols:
@@ -465,7 +442,7 @@ class SMCTradingBot:
 
             total_score = score_4h + 2.0  # MTF bonus
 
-            if total_score >= SCORE_THRESHOLD:
+            if total_score >= active_threshold:
                 direction = "LONG" if df_4h_analyzed['close'].iloc[-1] > df_4h_analyzed['ma200'].iloc[-1] else "SHORT"
                 
                 chart_buf = create_chart_image(df_4h_analyzed, symbol)
@@ -480,7 +457,7 @@ class SMCTradingBot:
                     mtf_scores=mtf_scores
                 )
 
-                entry_price = df_4h_analyzed['close'].iloc[-1]  # DÜZELTİLDİ: Yazım hatası giderildi
+                entry_price = df_4h_analyzed['close'].iloc[-1]
                 stop_price = entry_price * 0.98 if direction == 'LONG' else entry_price * 1.02
                 self.db.add_active_trade(symbol, direction, entry_price, stop_price)
 
@@ -489,7 +466,7 @@ class SMCTradingBot:
 
     def start(self):
         logging.info("SMC Trading Bot Başlatıldı. Render ortamında çalışıyor...")
-        while Type := True:
+        while True:
             try:
                 self.run_scan()
             except Exception as e:
