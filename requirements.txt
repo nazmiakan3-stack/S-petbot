@@ -1,9 +1,9 @@
 flask
 ccxt
 pandas
-pandas-ta
+git+https://github.com/twopirllc/pandas-ta.git
+plotly
+openpyxl
 smartmoneyconcepts
 requests
-plotly
-kaleido
-openpyxl
+feedparser
