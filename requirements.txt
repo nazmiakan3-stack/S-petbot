@@ -3,7 +3,7 @@ ccxt
 pandas
 pandas-ta
 plotly
-kaleido==0.1.0.post1
+kaleido
 openpyxl
 smartmoneyconcepts
 requests
