@@ -16,12 +16,10 @@ from smartmoneyconcepts import smc
 # ==========================================
 # 1. AYARLAR VE BULUT YAPILANDIRMASI
 # ==========================================
-# Render üzerindeki Environment Variables (Ortam Değişkenleri) kısmından çekilecek
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL") # Kendi kendini uyanık tutması için Render'ın sana verdiği link
+RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL")
 
-# Taranacak 50 Coin
 HEDEF_COINLER = [
     'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT', 'SHIB/USDT', 'DOT/USDT',
     'LINK/USDT', 'TRX/USDT', 'MATIC/USDT', 'LTC/USDT', 'BCH/USDT', 'XLM/USDT', 'NEAR/USDT', 'ATOM/USDT', 'UNI/USDT', 'APT/USDT',
@@ -37,7 +35,6 @@ ZAMAN_DILIMI = '4h'
 # ==========================================
 app = Flask(__name__)
 
-# Render'ın botu kapatmasını engelleyen geçici web sayfası
 @app.route('/')
 def keep_alive():
     zaman = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -48,17 +45,16 @@ def run_flask():
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 def oto_ping():
-    """Botun uyku moduna geçmesini engellemek için her 10 dakikada bir kendi web sitesine girer."""
     while True:
         if RENDER_URL:
             try:
                 requests.get(RENDER_URL)
                 print(f"[{datetime.now().strftime('%H:%M')}] ⚡ Uyku modu engellendi, siteye ping atıldı.")
             except: pass
-        time.sleep(600) # 10 dakikada bir tetiklenir
+        time.sleep(600)
 
 # ==========================================
-# 3. VERİTABANI İŞLEMLERİ (Kâr/Zarar Takibi)
+# 3. VERİTABANI İŞLEMLERİ
 # ==========================================
 def db_baglanti_al():
     conn = sqlite3.connect('islemler.db', check_same_thread=False)
@@ -114,7 +110,7 @@ def acik_islemleri_kontrol_et(guncel_fiyatlar):
     if guncelleme_oldu: excel_raporu_olustur()
 
 # ==========================================
-# 4. EXCEL RAPORLAMA (Daraltılmış Sütunlar)
+# 4. EXCEL RAPORLAMA VE TELEGRAM'A GÖNDERME
 # ==========================================
 def excel_raporu_olustur():
     try:
@@ -175,7 +171,17 @@ def excel_raporu_olustur():
         for col in ws.columns: ws.column_dimensions[col[0].column_letter].width = 11.5
         ws.freeze_panes = 'A2'
         wb.save(dosya_adi)
-    except: pass
+
+        # TELEGRAM'A EXCEL DOSYASI GÖNDERME EKLENTİSİ
+        if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
+            with open(dosya_adi, 'rb') as doc:
+                requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument",
+                    data={'chat_id': TELEGRAM_CHAT_ID, 'caption': '📊 Güncel Performans Raporu (Excel)'},
+                    files={'document': doc}
+                )
+    except Exception as e:
+        print(f"Excel oluşturma/gönderme hatası: {e}")
 
 # ==========================================
 # 5. SMC, İNDİKATÖR VE GRAFİK
@@ -252,14 +258,14 @@ def telegram_gonder(symbol, skor, kriterler, fiyat, df):
     islem_kaydet(symbol, "LONG", fiyat, stop_loss)
 
 # ==========================================
-# 6. ANA DÖNGÜ (BOTUN KALBİ)
+# 6. ANA DÖNGÜ
 # ==========================================
 def bot_motoru():
     db_kurulum()
     excel_raporu_olustur()
     print("🚀 Sistem Başlatıldı. Analizler dönüyor...")
     
-    while True: # <<--- SÜREKLİ TEKRARLAYAN ANA DÖNGÜ BURASI
+    while True:
         try:
             if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
                 print("⚠️ HATA: Telegram bilgileri eksik! Lütfen Render ayarlarından ekleyin.")
@@ -277,7 +283,7 @@ def bot_motoru():
             
             acik_islemleri_kontrol_et(guncel_fiyatlar)
             print(f"[{datetime.now().strftime('%H:%M')}] Tarama bitti. 15dk bekleniyor...")
-            time.sleep(900) # 15 dakika (900 saniye) bekleme
+            time.sleep(900)
             
         except Exception as e:
             print(f"⚠️ Hata: {e}")
@@ -285,11 +291,6 @@ def bot_motoru():
 
 if __name__ == "__main__":
     print("Sistem başlatılıyor... Bot arka planda çalışacak.")
-    
-    # 1. Kripto Botunu ve Pingi ARKA PLANDA Başlat (Daemon)
     threading.Thread(target=bot_motoru, daemon=True).start()
     threading.Thread(target=oto_ping, daemon=True).start()
-    
-    # 2. Flask Web Sunucusunu ANA EKRANDA Başlat 
-    # (Render'ın portu dinleyip sitenin açık olduğunu görmesi için bu şarttır)
     run_flask()
