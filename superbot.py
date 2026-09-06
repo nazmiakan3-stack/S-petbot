@@ -21,15 +21,19 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL")
 
+# Görseldeki 73 coinin tamamı eklendi
 HEDEF_COINLER = [
-    'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT', 'SHIB/USDT', 'DOT/USDT',
-    'LINK/USDT', 'TRX/USDT', 'MATIC/USDT', 'LTC/USDT', 'BCH/USDT', 'XLM/USDT', 'NEAR/USDT', 'ATOM/USDT', 'UNI/USDT', 'APT/USDT',
-    'INJ/USDT', 'OP/USDT', 'ARB/USDT', 'LDO/USDT', 'RNDR/USDT', 'FIL/USDT', 'STX/USDT', 'IMX/USDT', 'SUI/USDT', 'SEI/USDT',
-    'TIA/USDT', 'MANTA/USDT', 'JUP/USDT', 'PYTH/USDT', 'ONDO/USDT', 'PENDLE/USDT', 'FET/USDT', 'AGIX/USDT', 'OCEAN/USDT', 'RUNE/USDT',
-    'GALA/USDT', 'SAND/USDT', 'MANA/USDT', 'AXS/USDT', 'DYDX/USDT', 'CFX/USDT', 'FTM/USDT', 'AAVE/USDT', 'SNX/USDT', 'ACE/USDT'
+    'ONT/USDT', 'JUP/USDT', 'SNX/USDT', 'LDO/USDT', 'ZETA/USDT', 'AAVE/USDT', 'TIA/USDT', 'VET/USDT', 'DYDX/USDT', 'LTC/USDT',
+    'AVAX/USDT', 'SUSHI/USDT', 'STX/USDT', 'XRP/USDT', 'ORDI/USDT', 'ENS/USDT', 'GALA/USDT', 'MANA/USDT', 'ICP/USDT', 'THETA/USDT',
+    'TRX/USDT', 'EGLD/USDT', 'ADA/USDT', 'AXS/USDT', 'INJ/USDT', 'AEVO/USDT', 'BCH/USDT', 'FLOKI/USDT', 'DOT/USDT', 'RUNE/USDT',
+    'KAS/USDT', 'COMP/USDT', 'BONK/USDT', 'ALT/USDT', 'BTC/USDT', 'FIL/USDT', 'WIF/USDT', 'PYTH/USDT', 'FET/USDT', 'PEPE/USDT',
+    'SHIB/USDT', 'SUI/USDT', 'ATOM/USDT', 'SAND/USDT', 'PORTAL/USDT', 'APT/USDT', 'STRK/USDT', 'ARB/USDT', 'DYM/USDT', 'METIS/USDT',
+    'BNB/USDT', 'UNI/USDT', 'SEI/USDT', 'HBAR/USDT', 'MANTA/USDT', 'LINK/USDT', 'OP/USDT', 'XAI/USDT', 'ALPINE/USDT', 'MAV/USDT',
+    'DOGE/USDT', 'ETHFI/USDT', 'CRV/USDT', 'PIXEL/USDT', 'IMX/USDT', 'ETH/USDT', 'GRT/USDT', 'ENJ/USDT', 'ONE/USDT', 'SOL/USDT',
+    'NEAR/USDT', 'ALGO/USDT', 'PENDLE/USDT'
 ]
 
-MIN_SKOR = 15.0 # Artık maksimum skor 20 olduğu için eşik 15.0'a çekildi
+MIN_SKOR = 15.0 # Maksimum skor 20 olduğu için eşik 15.0'a çekildi
 exchange = ccxt.binance({'enableRateLimit': True})
 
 # ==========================================
@@ -260,7 +264,7 @@ def excel_raporu_olustur():
     except Exception as e: print(f"Excel Hatası: {e}")
 
 # ==========================================
-# 5. GELİŞMİŞ MTF VE SMC ANALİZİ (309538.jpg FORMATI)
+# 5. GELİŞMİŞ MTF VE SMC ANALİZİ
 # ==========================================
 def veri_cek(symbol, tf):
     try:
@@ -276,7 +280,8 @@ def analiz_yap(symbol):
     df_4h = veri_cek(symbol, '4h')
     df_1h = veri_cek(symbol, '1h')
     
-    if df_4h is None: return 0, [], 0, None, "YOK", []
+    # Veri çekilemezse veya eksik gelirse pas geç
+    if df_4h is None: return 0, [], 0, None, "YOK", [], 0.0
 
     # İndikatörler
     df_4h['RSI'] = ta.rsi(df_4h['close'], length=14)
