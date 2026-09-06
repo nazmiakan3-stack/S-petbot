@@ -284,12 +284,12 @@ def bot_motoru():
             time.sleep(60)
 
 if __name__ == "__main__":
-    # 1. Flask Web Sunucusunu Başlat (Arka Planda)
-    threading.Thread(target=run_flask, daemon=True).start()
+    print("Sistem başlatılıyor... Bot arka planda çalışacak.")
     
-    # 2. Uyku Engelleyici Oto-Ping Sistemini Başlat (Arka Planda)
+    # 1. Kripto Botunu ve Pingi ARKA PLANDA Başlat (Daemon)
+    threading.Thread(target=bot_motoru, daemon=True).start()
     threading.Thread(target=oto_ping, daemon=True).start()
     
-    # 3. Kripto Botunu Başlat (Ana Ekranda)
-    bot_motoru()
-
+    # 2. Flask Web Sunucusunu ANA EKRANDA Başlat 
+    # (Render'ın portu dinleyip sitenin açık olduğunu görmesi için bu şarttır)
+    run_flask()
