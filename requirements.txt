@@ -1,7 +1,7 @@
 flask
 ccxt
 pandas
-git+https://github.com/twopirllc/pandas-ta.git
+pandas-ta
 plotly
 kaleido==0.1.0.post1
 openpyxl
