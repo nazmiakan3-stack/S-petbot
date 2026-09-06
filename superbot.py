@@ -340,7 +340,10 @@ def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float) -> str:
         legend=dict(orientation="h", y=1.05)
     )
 
-    dosya = f"/home/workdir/artifacts/{symbol.replace('-', '_')}_chart.png"
+    # Render ve lokal uyumlu yol
+    base_dir = "/tmp" if (os.environ.get("RENDER") or os.environ.get("PORT")) else "."
+    os.makedirs(base_dir, exist_ok=True)
+    dosya = os.path.join(base_dir, f"{symbol.replace('-', '_')}_chart.png")
     fig.write_image(dosya, scale=2)
     return dosya
 
@@ -348,8 +351,14 @@ def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float) -> str:
 # ==========================================
 # 5. VERİTABANI + İŞLEM YÖNETİMİ
 # ==========================================
+def get_db_path():
+    """Render'da /tmp, lokalde current dir."""
+    if os.environ.get("RENDER") or os.environ.get("PORT"):
+        return "/tmp/islemler.db"
+    return "islemler.db"
+
 def db_baglanti():
-    conn = sqlite3.connect("/home/workdir/artifacts/islemler.db", check_same_thread=False)
+    conn = sqlite3.connect(get_db_path(), check_same_thread=False)
     return conn, conn.cursor()
 
 
@@ -496,7 +505,9 @@ def excel_raporu_olustur(demo_data: bool = False):
     df = pd.read_sql_query("SELECT * FROM islemler", conn)
     conn.close()
 
-    dosya = "/home/workdir/artifacts/Performans_Raporu.xlsx"
+    base_dir = "/tmp" if (os.environ.get("RENDER") or os.environ.get("PORT")) else "."
+    os.makedirs(base_dir, exist_ok=True)
+    dosya = os.path.join(base_dir, "Performans_Raporu.xlsx")
     wb = Workbook()
     ws1 = wb.active
     ws1.title = "Coin Performansı"
@@ -545,7 +556,7 @@ def excel_raporu_olustur(demo_data: bool = False):
             """, r)
         conn.commit()
         conn.close()
-        df = pd.read_sql_query("SELECT * FROM islemler", sqlite3.connect("/home/workdir/artifacts/islemler.db"))
+        df = pd.read_sql_query("SELECT * FROM islemler", sqlite3.connect(get_db_path()))
 
     if df.empty:
         ws1["A1"] = "Henüz işlem yok"
@@ -674,7 +685,7 @@ def excel_raporu_olustur(demo_data: bool = False):
 
 def performans_ozeti_metin() -> str:
     """Ekrandaki +138R tarzı özet metin."""
-    conn = sqlite3.connect("/home/workdir/artifacts/islemler.db")
+    conn = sqlite3.connect(get_db_path())
     df = pd.read_sql_query("SELECT * FROM islemler WHERE durum != 'ACIK'", conn)
     conn.close()
     if df.empty:
@@ -774,7 +785,7 @@ def tek_seferlik_tarama(max_coin: int = 25):
     telegram_mesaj(ozet)
     print("\n" + ozet)
 
-    print("\n📁 Çıktılar /home/workdir/artifacts/ klasöründe:")
+    print("\n📁 Çıktılar hazır (Render'da /tmp, lokalde current dir):")
     print("  - Performans_Raporu.xlsx")
     print("  - *_chart.png dosyaları")
     print("  - islemler.db")
@@ -782,11 +793,45 @@ def tek_seferlik_tarama(max_coin: int = 25):
 
 
 # ==========================================
-# 9. SÜREKLİ BOT (opsiyonel)
+# 9. FLASK KEEP-ALIVE (Render.com için)
+# ==========================================
+from flask import Flask
+app = Flask(__name__)
+
+@app.route('/')
+def keep_alive():
+    return f"""
+    <h1>🟢 Kripto Sinyal Botu 7/24 Aktif!</h1>
+    <p>Son Kontrol: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+    <p>Render + GitHub üzerinde çalışıyor.</p>
+    <p>Bu bot yalnızca teknik analiz üretir, yatırım tavsiyesi değildir.</p>
+    """
+
+@app.route('/health')
+def health():
+    return {"status": "ok", "time": datetime.now().isoformat()}, 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+
+def oto_ping():
+    """Render free tier'in uyumasını engellemek için kendini pingler."""
+    while True:
+        if RENDER_URL:
+            try:
+                requests.get(RENDER_URL, timeout=10)
+                print(f"[PING] {RENDER_URL} → OK")
+            except Exception as e:
+                print(f"[PING] Hata: {e}")
+        time.sleep(600)  # 10 dakikada bir
+
+# ==========================================
+# 10. SÜREKLİ BOT MOTORU
 # ==========================================
 def bot_motoru():
     db_kurulum()
-    print("🚀 Sürekli bot başlatıldı...")
+    print("🚀 Sürekli bot başlatıldı (Render/GitHub uyumlu)...")
     while True:
         try:
             guncel = {}
@@ -798,16 +843,28 @@ def bot_motoru():
                     telegram_gonder(coin, skor, krit, fiyat, df, yon, mtf, bonus)
                 time.sleep(0.35)
             acik_islemleri_kontrol(guncel)
-            time.sleep(900)
+            time.sleep(900)  # 15 dakikada bir tam tarama
         except Exception as e:
             print(f"Döngü hata: {e}")
             time.sleep(60)
 
-
+# ==========================================
+# 11. BAŞLATMA
+# ==========================================
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "--continuous":
+
+    # Render / Production modu (Flask + arka plan bot + ping)
+    if os.environ.get("RENDER") or os.environ.get("PORT") or "--render" in sys.argv:
+        print("🌐 Render / Production modu başlatılıyor...")
+        threading.Thread(target=bot_motoru, daemon=True).start()
+        threading.Thread(target=oto_ping, daemon=True).start()
+        run_flask()
+
+    # Lokal sürekli bot
+    elif len(sys.argv) > 1 and sys.argv[1] == "--continuous":
         bot_motoru()
+
+    # Varsayılan: tek seferlik tarama + rapor
     else:
-        # Varsayılan: hemen tek seferlik tarama + rapor
         tek_seferlik_tarama(max_coin=20)
