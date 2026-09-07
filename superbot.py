@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gelişmiş Kripto Sinyal Botu - Tam Sürüm (Excel & Siyah Dashboard Görselli)
-- SMC + İndikatör Skorlama
-- MTF Analizi & Bonuslar
-- Detaylı Grafik Üretimi
-- Açık İşlem Takibi & BE (Break Even) Yönetimi
-- Excel 2 Sekmeli Renkli Rapor (Telegram Belge Gönderimi Dahil)
-- Siyah Temalı Görsel Performans Dashboard Paneli (Plotly Dark UI)
+Gelişmiş Kripto Sinyal Botu - Production Sürümü
+(Render Web Service / Flask Keep-Alive & GitHub Actions Uyumlu)
 """
 
 import os
+import sys
 import time
 import sqlite3
+import threading
 from datetime import datetime
 import requests
 import pandas as pd
@@ -23,15 +20,31 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.utils import get_column_letter
+from flask import Flask
 
 # ==========================================
-# 1. AYARLAR & ORTAM DEĞİŞKENLERİ
+# 1. FLASK KEEP-ALIVE SERVER (Render Free Tier Uyumlu)
+# ==========================================
+app = Flask(__name__)
+
+@app.route("/")
+def health_check():
+    return "OK - Kripto Sinyal Botu Aktif ve Çalışıyor", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
+
+# ==========================================
+# 2. AYARLAR & ORTAM DEĞİŞKENLERİ
 # ==========================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-# Dinamik Klasör Ayarı (Render & GitHub Actions Uyumlu)
 ARTIFACT_DIR = os.environ.get("ARTIFACT_DIR", "./artifacts")
+RUN_ONCE = os.environ.get("RUN_ONCE", "false").lower() in ["true", "1", "yes"]
+TARAMA_ARALIGI_DURMA_SANIYE = int(os.environ.get("TARAMA_ARALIGI_DURMA_SANIYE", "3600"))
+
 os.makedirs(ARTIFACT_DIR, exist_ok=True)
 
 HEDEF_COINLER = [
@@ -49,7 +62,7 @@ MIN_SKOR = 15.0
 OKX_BASE = "https://www.okx.com"
 
 # ==========================================
-# 2. VERİ ÇEKME (OKX)
+# 3. VERİ ÇEKME (OKX API)
 # ==========================================
 def veri_cek(symbol: str, bar: str = "4H", limit: int = 250) -> pd.DataFrame | None:
     try:
@@ -74,7 +87,7 @@ def veri_cek(symbol: str, bar: str = "4H", limit: int = 250) -> pd.DataFrame | N
         return None
 
 # ==========================================
-# 3. TEKNİK VE SMC ANALİZİ
+# 4. TEKNİK & SMC ANALİZİ
 # ==========================================
 def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
     if df is None or len(df) < 50:
@@ -253,7 +266,7 @@ def analiz_yap(symbol: str):
     return skor, kriterler, info["fiyat"], df_4h, yon, mtf_list, mtf_bonus
 
 # ==========================================
-# 4. GRAFİK OLUŞTURMA
+# 5. GRAFİK OLUŞTURMA
 # ==========================================
 def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float) -> str:
     df_plot = df.tail(120).copy()
@@ -282,7 +295,7 @@ def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float) -> str:
     return dosya
 
 # ==========================================
-# 5. VERİTABANI & TELEGRAM BİLDİRİMLERİ
+# 6. VERİTABANI & TELEGRAM BİLDİRİMLERİ
 # ==========================================
 def db_baglanti():
     db_path = os.path.join(ARTIFACT_DIR, "islemler.db")
@@ -334,7 +347,6 @@ def telegram_foto(path: str, caption: str):
         print(f"Telegram foto hata: {e}")
 
 def telegram_belge_gonder(dosya_yolu: str, caption: str = ""):
-    """Excel raporlarını Telegram'a belge/dosya olarak gönderir."""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print(f"\n[TELEGRAM BELGE] {dosya_yolu}\n")
         return
@@ -387,7 +399,7 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
             elif anlik >= stop:
                 durum, r_val = ('BE', 0.0) if is_be else ('LOSS', -1.0)
                 telegram_mesaj(f"{'🛡' if is_be else '❌'} <b>{coin} (SHORT)</b>\n{'Başabaş Kapanış' if is_be else 'Stop Oldu'} ({r_val:+.2f}R)")
-                c.execute("UPDATE islemler SET durum=?, kâr_r=? WHERE id=?", (durum, r_val, islem_id))
+                c.execute("UPDATE islemler SET durum=?, kâr_r=? WHERE id=?", (islem_id,))
                 guncelleme = True
 
     conn.commit()
@@ -396,10 +408,9 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
         excel_raporu_olustur()
 
 # ==========================================
-# 6. EXCEL RAPORU & SIYAH DASHBOARD
+# 7. EXCEL & SIYAH DASHBOARD RAPORLARI
 # ==========================================
 def siyah_dashboard_olustur():
-    """Aylık kâr/zarar performansını siyah dashboard kartı (Dark UI Panel) olarak üretir."""
     conn = sqlite3.connect(os.path.join(ARTIFACT_DIR, "islemler.db"))
     df = pd.read_sql_query("SELECT * FROM islemler WHERE durum != 'ACIK'", conn)
     conn.close()
@@ -407,12 +418,10 @@ def siyah_dashboard_olustur():
     if df.empty:
         return None
 
-    # Tarih formatlama ve aylık gruplama
     df['tarih_dt'] = pd.to_datetime(df['tarih'], errors='coerce')
     df['ay'] = df['tarih_dt'].dt.strftime('%Y-%m')
     
-    aylik = df.groupby('ay')['kâr_r'].sum().reset_index()
-    aylik = aylik.sort_values('ay', ascending=True)
+    aylik = df.groupby('ay')['kâr_r'].sum().reset_index().sort_values('ay', ascending=True)
 
     toplam_r = df['kâr_r'].sum()
     ort_r = aylik['kâr_r'].mean() if not aylik.empty else 0.0
@@ -431,20 +440,14 @@ def siyah_dashboard_olustur():
 
     fig = go.Figure()
 
-    # Koyu Temalı Tablo Paneli
     fig.add_trace(go.Table(
         header=dict(
             values=["<b>DÖNEM / AY</b>", "<b>AYLIK GETİRİ (R)</b>", "<b>KATKI PAYI (%)</b>", "<b>DURUM</b>"],
-            fill_color='#1f2937',
-            align='center',
-            font=dict(color='white', size=13, family="Arial")
+            fill_color='#1f2937', align='center', font=dict(color='white', size=13, family="Arial")
         ),
         cells=dict(
             values=[aylar, getiriler, katkilar, durumlar],
-            fill_color='#111827',
-            align='center',
-            font=dict(color=['#9ca3af', '#10b981', '#3b82f6', 'white'], size=12, family="Arial"),
-            height=30
+            fill_color='#111827', align='center', font=dict(color=['#9ca3af', '#10b981', '#3b82f6', 'white'], size=12, family="Arial"), height=30
         )
     ))
 
@@ -459,18 +462,14 @@ def siyah_dashboard_olustur():
 
     fig.update_layout(
         title=dict(text=baslik_metni, x=0.5, y=0.92, xanchor='center', font=dict(size=15, color="white")),
-        paper_bgcolor="#0b0f19",
-        plot_bgcolor="#0b0f19",
-        width=800,
-        height=500,
-        margin=dict(l=20, r=20, t=110, b=20)
+        paper_bgcolor="#0b0f19", plot_bgcolor="#0b0f19", width=800, height=500, margin=dict(l=20, r=20, t=110, b=20)
     )
 
     dosya_yolu = os.path.join(ARTIFACT_DIR, "dashboard_ozet.png")
     fig.write_image(dosya_yolu, scale=2)
     return dosya_yolu
 
-def excel_raporu_olustur(demo_data: bool = False):
+def excel_raporu_olustur():
     conn, _ = db_baglanti()
     df = pd.read_sql_query("SELECT * FROM islemler", conn)
     conn.close()
@@ -481,20 +480,8 @@ def excel_raporu_olustur(demo_data: bool = False):
     ws1.title = "Coin Performansı"
     ws2 = wb.create_sheet("Ozet")
 
-    if df.empty or demo_data:
-        demo_rows = [
-            ("ETH-USDT", "SHORT", 2447.4, 2300, 2500, 2500, "ACIK", 0, 0, "2026-09-06 21:00:00"),
-            ("SOL-USDT", "LONG", 140, 147, 135, 135, "WIN", 1.5, 1, "2026-08-15 10:00:00"),
-            ("NEAR-USDT", "LONG", 4.5, 4.8, 4.3, 4.3, "WIN", 1.5, 1, "2026-07-10 09:00:00"),
-            ("ONT-USDT", "LONG", 0.22, 0.24, 0.21, 0.21, "LOSS", -1.0, 0, "2026-04-10 09:00:00"),
-            ("LINK-USDT", "LONG", 14.5, 15.5, 13.8, 13.8, "WIN", 1.5, 1, "2026-06-01 09:00:00"),
-        ]
-        conn, c = db_baglanti()
-        for r in demo_rows:
-            c.execute("INSERT INTO islemler (coin, yon, giris_fiyati, hedef_r1, stop_loss, orjinal_stop, durum, kâr_r, is_be, tarih) VALUES (?,?,?,?,?,?,?,?,?,?)", r)
-        conn.commit()
-        conn.close()
-        df = pd.read_sql_query("SELECT * FROM islemler", sqlite3.connect(os.path.join(ARTIFACT_DIR, "islemler.db")))
+    if df.empty:
+        return dosya
 
     ozet = df.groupby("coin").agg(
         Toplam_Islem=("id", "count"),
@@ -545,7 +532,6 @@ def excel_raporu_olustur(demo_data: bool = False):
     for col in ws1.columns:
         ws1.column_dimensions[get_column_letter(col[0].column)].width = 18
 
-    # Özet Sekmesi
     toplam_islem = int(ozet["Toplam_Islem"].sum())
     toplam_win = int(ozet["WIN"].sum())
     toplam_loss = int(ozet["LOSS"].sum())
@@ -577,12 +563,7 @@ def performans_ozeti_metin() -> str:
     if df.empty: return "Henüz kapanmış işlem bulunmuyor."
 
     toplam_r = df["kâr_r"].sum()
-    return f"""📊 <b>Kripto Sinyal Botu Performans Özeti</b>
-
-🟢 <b>TOPLAM KAZANÇ</b>: +{toplam_r:.1f} R
-🎯 <b>KAPANAN İŞLEM</b>: {len(df)} Adet
-
-⚠️ <i>Bu bot yalnızca teknik/algoritmik analiz üretir; garanti edilmiş fiyat hareketi veya yatırım tavsiyesi değildir.</i>"""
+    return f"📊 <b>Kripto Sinyal Botu Performans Özeti</b>\n\n🟢 <b>TOPLAM KAZANÇ</b>: +{toplam_r:.1f} R\n🎯 <b>KAPANAN İŞLEM</b>: {len(df)} Adet"
 
 def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus):
     mesaj = f"🧠 <b>{symbol} – {yon}</b>\n⭐ Skor: {skor:.2f}/20\n⏱ MTF bonus: +{mtf_bonus:.2f}/2\n\n<b>4H kriterleri:</b>\n"
@@ -595,7 +576,7 @@ def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus
     stop = fiyat - (atr * 1.5) if yon == "LONG" else fiyat + (atr * 1.5)
     hedef = (fiyat + (fiyat-stop)*1.5) if yon=='LONG' else (fiyat - (stop-fiyat)*1.5)
 
-    mesaj += f"\n💰 Giriş: {fiyat:.6f}\n🛡️ Stop: {stop:.6f}\n🎯 Hedef (1.5R): {hedef:.6f}\n\n⚠️ <i>Garanti edilmiş fiyat hareketi içermez.</i>"
+    mesaj += f"\n💰 Giriş: {fiyat:.6f}\n🛡️ Stop: {stop:.6f}\n🎯 Hedef (1.5R): {hedef:.6f}"
 
     try:
         foto = grafik_ciz(df, symbol, yon, skor)
@@ -606,32 +587,30 @@ def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus
     islem_kaydet(symbol, yon, fiyat, stop)
 
 # ==========================================
-# 7. ÇALIŞTIRMA & TARAMA
+# 8. ÇALIŞTIRMA & DÖNGÜ YÖNETİMİ
 # ==========================================
-def tek_seferlik_tarama(max_coin: int = 25):
-    print("🚀 Tarama başlatılıyor...")
+def tek_seferlik_tarama():
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 Tarama başlatılıyor...")
     db_kurulum()
 
     guncel = {}
-    for coin in HEDEF_COINLER[:max_coin]:
+    for coin in HEDEF_COINLER:
         try:
             skor, krit, fiyat, df, yon, mtf, bonus = analiz_yap(coin)
             if fiyat: guncel[coin] = fiyat
             if skor >= MIN_SKOR and df is not None:
                 telegram_gonder(coin, skor, krit, fiyat, df, yon, mtf, bonus)
-            time.sleep(0.3)
+            time.sleep(0.2)
         except Exception as e:
             print(f"Hata ({coin}): {e}")
 
     acik_islemleri_kontrol(guncel)
 
-    # Excel Raporu ve Telegram Belge Gönderimi
-    excel_dosyasi = excel_raporu_olustur(demo_data=False)
+    excel_dosyasi = excel_raporu_olustur()
     ozet_metni = performans_ozeti_metin()
     
     telegram_mesaj(ozet_metni)
 
-    # Siyah Dashboard Paneli Üretimi & Telegram Foto Gönderimi
     dashboard_img = siyah_dashboard_olustur()
     if dashboard_img and os.path.exists(dashboard_img):
         telegram_foto(dashboard_img, "📊 <b>Kripto Sinyal Botu - Görsel Performans Özeti</b>")
@@ -639,7 +618,20 @@ def tek_seferlik_tarama(max_coin: int = 25):
     if excel_dosyasi and os.path.exists(excel_dosyasi):
         telegram_belge_gonder(excel_dosyasi, "📊 Güncel Kripto Performans Raporu (Excel)")
 
-    print("✅ Tarama ve raporlama tamamlandı.")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Tarama ve raporlama tamamlandı.")
 
 if __name__ == "__main__":
-    tek_seferlik_tarama(max_coin=20)
+    if RUN_ONCE:
+        tek_seferlik_tarama()
+    else:
+        # Flask Web Sunucusunu Arka Planda Başlat (Render Free Web Service Uyumlu)
+        threading.Thread(target=run_flask, daemon=True).start()
+        print("🤖 Bot sürekli çalışma modunda (Flask Web Service) başlatıldı.")
+        
+        while True:
+            try:
+                tek_seferlik_tarama()
+            except Exception as e:
+                print(f"Döngü hatası: {e}")
+            print(f"💤 {TARAMA_ARALIGI_DURMA_SANIYE} saniye bekleniyor...")
+            time.sleep(TARAMA_ARALIGI_DURMA_SANIYE)
