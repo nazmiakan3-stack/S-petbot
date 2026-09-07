@@ -10,6 +10,7 @@ from datetime import datetime
 import requests
 import pandas as pd
 import pandas_ta as ta
+import numpy as np
 
 # Matplotlib GUI backend ayarı (Sunucu için zorunlu)
 import matplotlib
@@ -44,7 +45,7 @@ TARAMA_ARALIGI_DURMA_SANIYE = int(os.environ.get("TARAMA_ARALIGI_DURMA_SANIYE", 
 
 os.makedirs(ARTIFACT_DIR, exist_ok=True)
 
-# Matplotlib eşzamanlı çakışmalarını önlemek için kilit (Lock)
+# Matplotlib eşzamanlı çakışmalarını önlemek için kilit
 matplotlib_lock = threading.Lock()
 
 HEDEF_COINLER = [
@@ -60,6 +61,29 @@ HEDEF_COINLER = [
 
 MIN_SKOR = 15.0
 OKX_BASE = "https://www.okx.com"
+
+# ==========================================
+# GÜVENLİ MİN / MAX (boş dizi hatasını tamamen önler)
+# ==========================================
+def safe_max(series_or_array):
+    try:
+        arr = np.asarray(series_or_array, dtype=float)
+        arr = arr[\~np.isnan(arr)]
+        if arr.size == 0:
+            return np.nan
+        return float(np.max(arr))
+    except Exception:
+        return np.nan
+
+def safe_min(series_or_array):
+    try:
+        arr = np.asarray(series_or_array, dtype=float)
+        arr = arr[\~np.isnan(arr)]
+        if arr.size == 0:
+            return np.nan
+        return float(np.min(arr))
+    except Exception:
+        return np.nan
 
 # ==========================================
 # 3. VERİ ÇEKME (OKX API)
@@ -81,7 +105,8 @@ def veri_cek(symbol: str, bar: str = "4H", limit: int = 250) -> pd.DataFrame | N
             df[col] = pd.to_numeric(df[col], errors="coerce")
         df["timestamp"] = pd.to_datetime(df["ts"].astype(float), unit="ms")
         df.set_index("timestamp", inplace=True)
-        return df[["open", "high", "low", "close", "volume"]].dropna() if len(df) > 50 else None
+        df = df[["open", "high", "low", "close", "volume"]].dropna()
+        return df if len(df) >= 60 else None
     except Exception as e:
         print(f"Veri çekme hatası {symbol}: {e}")
         return None
@@ -90,16 +115,19 @@ def veri_cek(symbol: str, bar: str = "4H", limit: int = 250) -> pd.DataFrame | N
 # 4. TEKNİK & SMC ANALİZİ
 # ==========================================
 def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
-    if df is None or len(df) < 50:
+    if df is None or len(df) < 60:
         return {}
 
     df = df.copy()
+    
+    # Göstergeler
     df["RSI"] = ta.rsi(df["close"], length=14)
     df["MA50"] = ta.sma(df["close"], length=50)
     df["MA100"] = ta.sma(df["close"], length=100)
     df["MA200"] = ta.sma(df["close"], length=200)
     df["ATR"] = ta.atr(df["high"], df["low"], df["close"], length=14)
 
+    # FVG
     df["FVG_up"] = (df["low"].shift(-1) > df["high"].shift(1)) & (df["close"] > df["open"])
     df["FVG_down"] = (df["high"].shift(-1) < df["low"].shift(1)) & (df["close"] < df["open"])
 
@@ -108,24 +136,34 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
     onceki = df.iloc[-2] if len(df) > 1 else son
     fiyat = float(son["close"])
 
-    recent_low = df["low"].iloc[-10:-1].min()
-    recent_high = df["high"].iloc[-10:-1].max()
+    # Güvenli recent high / low
+    recent_slice = df.iloc[-10:-1] if len(df) >= 11 else df.iloc[:-1]
+    recent_low = safe_min(recent_slice["low"])
+    recent_high = safe_max(recent_slice["high"])
+
+    # Güvenli BOS hesaplama
+    bos_slice = df["high"].iloc[-look:-1] if len(df) > look else df["high"].iloc[:-1]
+    bos_high = safe_max(bos_slice)
+    bos_low_slice = df["low"].iloc[-look:-1] if len(df) > look else df["low"].iloc[:-1]
+    bos_low = safe_min(bos_low_slice)
+
+    atr_val = float(son["ATR"]) if pd.notna(son["ATR"]) else fiyat * 0.02
 
     return {
         "fiyat": fiyat,
         "rsi": float(son["RSI"]) if pd.notna(son["RSI"]) else 50.0,
-        "atr": float(son["ATR"]) if pd.notna(son["ATR"]) else fiyat * 0.02,
-        "bullish_fvg": bool(df["FVG_up"].iloc[-5:].any()),
-        "bearish_fvg": bool(df["FVG_down"].iloc[-5:].any()),
+        "atr": atr_val,
+        "bullish_fvg": bool(df["FVG_up"].iloc[-5:].any()) if len(df) >= 5 else False,
+        "bearish_fvg": bool(df["FVG_down"].iloc[-5:].any()) if len(df) >= 5 else False,
         "above_ma200": fiyat > (float(son["MA200"]) if pd.notna(son["MA200"]) else 0),
         "above_ma100": fiyat > (float(son["MA100"]) if pd.notna(son["MA100"]) else 0),
         "above_ma50": fiyat > (float(son["MA50"]) if pd.notna(son["MA50"]) else 0),
-        "sellside_sweep": (son["low"] < recent_low) and (son["close"] > recent_low),
-        "buyside_sweep": (son["high"] > recent_high) and (son["close"] < recent_high),
-        "bullish_bos": son["close"] > df["high"].iloc[-look:-1].max(),
-        "bearish_bos": son["close"] < df["low"].iloc[-look:-1].min(),
-        "bullish_ob": (onceki["close"] > onceki["open"]) and (onceki["close"] - onceki["open"]) > (float(son["ATR"]) * 0.8 if pd.notna(son["ATR"]) else 0),
-        "bearish_ob": (onceki["close"] < onceki["open"]) and (onceki["open"] - onceki["close"]) > (float(son["ATR"]) * 0.8 if pd.notna(son["ATR"]) else 0),
+        "sellside_sweep": (not np.isnan(recent_low)) and (son["low"] < recent_low) and (son["close"] > recent_low),
+        "buyside_sweep": (not np.isnan(recent_high)) and (son["high"] > recent_high) and (son["close"] < recent_high),
+        "bullish_bos": (not np.isnan(bos_high)) and (son["close"] > bos_high),
+        "bearish_bos": (not np.isnan(bos_low)) and (son["close"] < bos_low),
+        "bullish_ob": (onceki["close"] > onceki["open"]) and ((onceki["close"] - onceki["open"]) > atr_val * 0.8),
+        "bearish_ob": (onceki["close"] < onceki["open"]) and ((onceki["open"] - onceki["close"]) > atr_val * 0.8),
     }
 
 def skor_hesapla(info: dict) -> tuple[float, list, str]:
@@ -133,62 +171,90 @@ def skor_hesapla(info: dict) -> tuple[float, list, str]:
     krit_l, krit_s = [], []
 
     if info.get("sellside_sweep"):
-        skor_l += 1.57; krit_l.append("Liquidity Sweep: 1.57 - Sell-side sweep + reclaim")
+        skor_l += 1.57
+        krit_l.append("Liquidity Sweep: 1.57 - Sell-side sweep + reclaim")
     if info.get("buyside_sweep"):
-        skor_s += 1.57; krit_s.append("Liquidity Sweep: 1.57 - Buy-side sweep + rejection")
+        skor_s += 1.57
+        krit_s.append("Liquidity Sweep: 1.57 - Buy-side sweep + rejection")
 
     if info.get("bullish_ob"):
-        skor_l += 1.57; krit_l.append("Order Block: 1.57 - Bullish OB at price")
+        skor_l += 1.57
+        krit_l.append("Order Block: 1.57 - Bullish OB at price")
     if info.get("bearish_ob"):
-        skor_s += 1.57; krit_s.append("Order Block: 1.57 - Bearish OB at price")
+        skor_s += 1.57
+        krit_s.append("Order Block: 1.57 - Bearish OB at price")
 
     if info.get("bullish_bos"):
-        skor_l += 1.80; krit_l.append("BOS: 1.80 - Bullish BOS")
-        skor_l += 1.35; krit_l.append("CHoCH: 1.35 - Bullish CHoCH")
+        skor_l += 1.80
+        krit_l.append("BOS: 1.80 - Bullish BOS")
+        skor_l += 1.35
+        krit_l.append("CHoCH: 1.35 - Bullish CHoCH")
     if info.get("bearish_bos"):
-        skor_s += 1.80; krit_s.append("BOS: 1.80 - Bearish BOS")
-        skor_s += 1.35; krit_s.append("CHoCH: 1.35 - Bearish CHoCH")
+        skor_s += 1.80
+        krit_s.append("BOS: 1.80 - Bearish BOS")
+        skor_s += 1.35
+        krit_s.append("CHoCH: 1.35 - Bearish CHoCH")
 
     if info.get("bullish_fvg"):
-        skor_l += 1.35; krit_l.append("FVG: 1.35 - Bullish FVG")
-        skor_l += 1.35; krit_l.append("SFP: 1.35 - Bullish SFP")
+        skor_l += 1.35
+        krit_l.append("FVG: 1.35 - Bullish FVG")
+        skor_l += 1.35
+        krit_l.append("SFP: 1.35 - Bullish SFP")
     if info.get("bearish_fvg"):
-        skor_s += 1.35; krit_s.append("FVG: 1.35 - Bearish FVG")
-        skor_s += 1.35; krit_s.append("SFP: 1.35 - Bearish SFP")
+        skor_s += 1.35
+        krit_s.append("FVG: 1.35 - Bearish FVG")
+        skor_s += 1.35
+        krit_s.append("SFP: 1.35 - Bearish SFP")
 
     if info.get("above_ma50"):
-        skor_l += 1.12; krit_l.append("Breaker Block: 1.12 - Bullish breaker")
-        skor_l += 1.12; krit_l.append("PO3: 1.12 - Bullish AMD/PO3 proxy")
+        skor_l += 1.12
+        krit_l.append("Breaker Block: 1.12 - Bullish breaker")
+        skor_l += 1.12
+        krit_l.append("PO3: 1.12 - Bullish AMD/PO3 proxy")
     else:
-        skor_s += 1.12; krit_s.append("Breaker Block: 1.12 - Bearish breaker")
-        skor_s += 1.12; krit_s.append("PO3: 1.12 - Bearish AMD/PO3 proxy")
+        skor_s += 1.12
+        krit_s.append("Breaker Block: 1.12 - Bearish breaker")
+        skor_s += 1.12
+        krit_s.append("PO3: 1.12 - Bearish AMD/PO3 proxy")
 
-    skor_l += 0.75; krit_l.append("Fibonacci: 0.75 - Neutral Fib zone near 0.886")
-    skor_s += 0.75; krit_s.append("Fibonacci: 0.75 - Neutral Fib zone near 0.886")
+    skor_l += 0.75
+    krit_l.append("Fibonacci: 0.75 - Neutral Fib zone near 0.886")
+    skor_s += 0.75
+    krit_s.append("Fibonacci: 0.75 - Neutral Fib zone near 0.886")
 
     rsi = info.get("rsi", 50)
     if rsi > 50:
-        skor_l += 1.12; krit_l.append(f"RSI: 1.12 - RSI {rsi:.1f} bullish")
+        skor_l += 1.12
+        krit_l.append(f"RSI: 1.12 - RSI {rsi:.1f} bullish")
     else:
-        skor_s += 1.12; krit_s.append(f"RSI: 1.12 - RSI {rsi:.1f} bearish")
+        skor_s += 1.12
+        krit_s.append(f"RSI: 1.12 - RSI {rsi:.1f} bearish")
 
     if info.get("above_ma200"):
-        skor_l += 1.35; krit_l.append("MA 200: 1.35 - Price above MA200")
+        skor_l += 1.35
+        krit_l.append("MA 200: 1.35 - Price above MA200")
     else:
-        skor_s += 1.35; krit_s.append("MA 200: 1.35 - Price below MA200")
+        skor_s += 1.35
+        krit_s.append("MA 200: 1.35 - Price below MA200")
 
     if info.get("above_ma100"):
-        skor_l += 0.90; krit_l.append("MA 100: 0.90 - Price above MA100 (bullish)")
+        skor_l += 0.90
+        krit_l.append("MA 100: 0.90 - Price above MA100 (bullish)")
     else:
-        skor_s += 0.90; krit_s.append("MA 100: 0.90 - Price below MA100 (bearish)")
+        skor_s += 0.90
+        krit_s.append("MA 100: 0.90 - Price below MA100 (bearish)")
 
     if info.get("above_ma50"):
-        skor_l += 0.90; krit_l.append("MA 50: 0.90 - Price above MA50")
+        skor_l += 0.90
+        krit_l.append("MA 50: 0.90 - Price above MA50")
     else:
-        skor_s += 0.90; krit_s.append("MA 50: 0.90 - Price below MA50")
+        skor_s += 0.90
+        krit_s.append("MA 50: 0.90 - Price below MA50")
 
-    skor_l += 0.68; krit_l.append("Equal High: 0.68 - Equal highs detected")
-    skor_s += 0.68; krit_s.append("Equal Low: 0.68 - Equal lows detected")
+    skor_l += 0.68
+    krit_l.append("Equal High: 0.68 - Equal highs detected")
+    skor_s += 0.68
+    krit_s.append("Equal Low: 0.68 - Equal lows detected")
 
     return (skor_l, krit_l, "LONG") if skor_l >= skor_s else (skor_s, krit_s, "SHORT")
 
@@ -201,8 +267,10 @@ def mtf_analiz(symbol: str) -> tuple[list, float, float]:
         if df is None or len(df) < 50:
             mtf_list.append(f"• {label}: DATA YETERSIZ")
             continue
+        
         ma50 = ta.sma(df["close"], 50).iloc[-1]
         p = df["close"].iloc[-1]
+        
         if pd.isna(ma50):
             mtf_list.append(f"• {label}: DATA YETERSIZ")
             continue
@@ -212,9 +280,12 @@ def mtf_analiz(symbol: str) -> tuple[list, float, float]:
         skor_approx = 8.0 + (2.0 if t == 1 else 0)
         mtf_list.append(f"• {label}: {yon} ({skor_approx:.2f}/18)")
         
-        if label == "1D": t1 = t
-        elif label == "4H": t4 = t
-        else: t1h = t
+        if label == "1D":
+            t1 = t
+        elif label == "4H":
+            t4 = t
+        else:
+            t1h = t
 
     bonus_l = 2.0 if (t1 == 1 and t4 == 1 and t1h == 1) else 0.0
     bonus_s = 2.0 if (t1 == -1 and t4 == -1 and t1h == -1) else 0.0
@@ -222,7 +293,7 @@ def mtf_analiz(symbol: str) -> tuple[list, float, float]:
 
 def analiz_yap(symbol: str):
     df_4h = veri_cek(symbol, "4H", 250)
-    if df_4h is None:
+    if df_4h is None or len(df_4h) < 60:
         return 0.0, [], 0.0, None, "YOK", [], 0.0
 
     info = basit_smc_ve_indikator(df_4h)
@@ -238,32 +309,50 @@ def analiz_yap(symbol: str):
     return skor, kriterler, info["fiyat"], df_4h, yon, mtf_list, mtf_bonus
 
 # ==========================================
-# 5. GÜVENLİ GRAFİK OLUŞTURMA (Thread-Safe)
+# 5. GÜVENLİ GRAFİK OLUŞTURMA (Thread-Safe + Boş veri koruması)
 # ==========================================
-def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float) -> str:
+def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float) -> str | None:
     with matplotlib_lock:
         try:
-            df_plot = df.tail(100).copy()
-            df_plot.rename(columns={
-                'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'
-            }, inplace=True)
+            if df is None or len(df) < 30:
+                print(f"Grafik için yetersiz veri: {symbol} (len={len(df) if df is not None else 0})")
+                return None
 
-            # Pandas Native Rolling (make_addplot tip hatalarını önlemek için)
-            ma50 = df_plot['Close'].rolling(window=50).mean()
-            ma100 = df_plot['Close'].rolling(window=100).mean()
-            ma200 = df_plot['Close'].rolling(window=200).mean()
+            # Son 100 mumu al, yeterli yoksa mevcut olanı kullan
+            df_plot = df.tail(min(100, len(df))).copy()
+            
+            if len(df_plot) < 20:
+                print(f"Grafik için çok az mum: {symbol}")
+                return None
+
+            df_plot = df_plot.rename(columns={
+                'open': 'Open', 'high': 'High', 'low': 'Low',
+                'close': 'Close', 'volume': 'Volume'
+            })
+
+            # Rolling MA'lar (NaN'ları güvenli şekilde yönet)
+            ma50 = df_plot['Close'].rolling(window=50, min_periods=10).mean()
+            ma100 = df_plot['Close'].rolling(window=100, min_periods=20).mean()
+            ma200 = df_plot['Close'].rolling(window=200, min_periods=30).mean()
+
+            # Sadece yeterli veri olan MA'ları ekle
+            addplots = []
+            if ma50.notna().sum() > 10:
+                addplots.append(mpf.make_addplot(ma50, color='#42a5f5', width=1.2))
+            if ma100.notna().sum() > 10:
+                addplots.append(mpf.make_addplot(ma100, color='#ffa726', width=1.2))
+            if ma200.notna().sum() > 10:
+                addplots.append(mpf.make_addplot(ma200, color='#66bb6a', width=1.5))
 
             mc = mpf.make_marketcolors(
                 up='#26a69a', down='#ef5350',
                 edge='inherit', wick='inherit', volume='in'
             )
-            s = mpf.make_mpf_style(base_mpf_style='nightclouds', marketcolors=mc, gridcolor='#2a2e39')
-
-            addplots = [
-                mpf.make_addplot(ma50, color='#42a5f5', width=1.2),
-                mpf.make_addplot(ma100, color='#ffa726', width=1.2),
-                mpf.make_addplot(ma200, color='#66bb6a', width=1.5),
-            ]
+            s = mpf.make_mpf_style(
+                base_mpf_style='nightclouds',
+                marketcolors=mc,
+                gridcolor='#2a2e39'
+            )
 
             dosya = os.path.join(ARTIFACT_DIR, f"{symbol.replace('-', '_')}_chart.png")
             
@@ -271,19 +360,22 @@ def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float) -> str:
                 df_plot,
                 type='candle',
                 style=s,
-                addplot=addplots,
+                addplot=addplots if addplots else None,
                 title=f"\n{symbol} | {yon} | Skor: {skor:.2f}/20 | 4H",
                 returnfig=True,
                 volume=False,
-                figsize=(10, 6)
+                figsize=(11, 6),
+                tight_layout=True
             )
-            fig.savefig(dosya, dpi=150, bbox_inches='tight')
+            
+            fig.savefig(dosya, dpi=140, bbox_inches='tight', facecolor='#131722')
             plt.close(fig)
             return dosya
+
         except Exception as e:
             plt.close('all')
             print(f"Grafik çizim detay hatası ({symbol}): {e}")
-            raise e
+            return None
 
 # ==========================================
 # 6. VERİTABANI & TELEGRAM BİLDİRİMLERİ
@@ -321,13 +413,19 @@ def telegram_mesaj(text: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return
     try:
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                      data={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=10)
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"},
+            timeout=10
+        )
     except Exception as e:
         print(f"Telegram mesaj hata: {e}")
 
 def telegram_foto(path: str, caption: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    if not path or not os.path.exists(path):
+        telegram_mesaj(caption)
         return
     try:
         with open(path, "rb") as f:
@@ -351,10 +449,12 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
 
     for row in rows:
         islem_id, coin, yon, giris, hedef, stop, orj_stop, is_be = row
-        if coin not in guncel_fiyatlar: continue
+        if coin not in guncel_fiyatlar:
+            continue
         anlik = guncel_fiyatlar[coin]
         risk = abs(giris - (orj_stop or stop))
-        if risk <= 0: continue
+        if risk <= 0:
+            continue
         mevcut_r = (anlik - giris) / risk if yon == "LONG" else (giris - anlik) / risk
 
         if mevcut_r >= 1.0 and is_be == 0:
@@ -383,23 +483,27 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
     conn.close()
 
 # ==========================================
-# 7. RAPOR & MESAJ GÖNDERİMİ (İKİ MESAJLI SİSTEM)
+# 7. RAPOR & MESAJ GÖNDERİMİ
 # ==========================================
 def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus):
     atr = ta.atr(df["high"], df["low"], df["close"], 14).iloc[-1]
-    if pd.isna(atr) or atr <= 0: atr = fiyat * 0.02
+    if pd.isna(atr) or atr <= 0:
+        atr = fiyat * 0.02
+        
     stop = fiyat - (atr * 1.5) if yon == "LONG" else fiyat + (atr * 1.5)
-    hedef = (fiyat + (fiyat-stop)*1.5) if yon=='LONG' else (fiyat - (stop-fiyat)*1.5)
+    hedef = (fiyat + (fiyat - stop) * 1.5) if yon == 'LONG' else (fiyat - (stop - fiyat) * 1.5)
 
     mesaj = f"🧠 <b>{symbol.replace('-', '/')} – {yon}</b>\n"
     mesaj += f"⭐ Skor: {skor:.2f}/20\n"
     mesaj += f"⏱ MTF bonus: +{mtf_bonus:.2f}/2\n\n"
     
     mesaj += "<b>4H kriterleri:</b>\n"
-    for k in kriterler: mesaj += f"• {k}\n"
+    for k in kriterler:
+        mesaj += f"• {k}\n"
     
     mesaj += "\n<b>Zaman dilimleri:</b>\n"
-    for m in mtf_list: mesaj += f"{m}\n"
+    for m in mtf_list:
+        mesaj += f"{m}\n"
     
     mesaj += "\n────────────────────\n\n"
     
@@ -412,7 +516,15 @@ def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus
     try:
         foto = grafik_ciz(df, symbol, yon, skor)
         kisa_baslik = f"🧠 <b>{symbol.replace('-', '/')} – {yon}</b> | Skor: {skor:.2f}/20"
-        telegram_foto(foto, kisa_baslik)
+        
+        if foto:
+            telegram_foto(foto, kisa_baslik)
+            # Geçici dosyayı silmek istersen:
+            # try: os.remove(foto)
+            # except: pass
+        else:
+            print(f"Grafik oluşturulamadı, sadece metin gönderiliyor: {symbol}")
+        
         telegram_mesaj(mesaj)
     except Exception as e:
         print(f"Gönderim hatası: {e}")
@@ -431,10 +543,11 @@ def tek_seferlik_tarama():
     for coin in HEDEF_COINLER:
         try:
             skor, krit, fiyat, df, yon, mtf, bonus = analiz_yap(coin)
-            if fiyat: guncel[coin] = fiyat
-            if skor >= MIN_SKOR and df is not None:
+            if fiyat:
+                guncel[coin] = fiyat
+            if skor >= MIN_SKOR and df is not None and yon in ["LONG", "SHORT"]:
                 telegram_gonder(coin, skor, krit, fiyat, df, yon, mtf, bonus)
-            time.sleep(0.2)
+            time.sleep(0.25)
         except Exception as e:
             print(f"Hata ({coin}): {e}")
 
