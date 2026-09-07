@@ -3,8 +3,8 @@ gunicorn
 ccxt
 pandas
 pandas-ta
-plotly
-kaleido==0.1.0
+matplotlib
+mplfinance
 openpyxl
 smartmoneyconcepts
 requests
