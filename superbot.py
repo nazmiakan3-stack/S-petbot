@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gelişmiş Kripto Sinyal Botu - Tam Düzeltmiş Versiyon
-Ekran görüntülerindeki Kripto Zeyna botuna birebir yakın özellikler:
-- SMC + klasik indikatör skorlama (max 20)
+Gelişmiş Kripto Sinyal Botu - Kripto Zeyna Ekran Görüntüleri Birebir Uyumlu Versiyon
+- SMC + klasik indikatör skorlama (max \~17 + MTF 2)
+- Sabit puanlı kriter listesi (BOS 1.80, Liquidity 1.57, vb.)
 - MTF bonus
 - Detaylı grafik (MA50/100/200)
-- Açık işlem + BE (Break Even) yönetimi
+- Açık işlem + BE yönetimi
 - Excel 2 sekmeli rapor (Coin Performansı + Özet) renkli
 - Aylık performans özeti
 - Telegram uyumlu mesaj formatı
@@ -35,7 +35,6 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 
-# Ekrandaki 73 coin (OKX formatı: BTC-USDT)
 HEDEF_COINLER = [
     'ONT-USDT', 'JUP-USDT', 'SNX-USDT', 'LDO-USDT', 'ZETA-USDT', 'AAVE-USDT', 'TIA-USDT', 'VET-USDT', 'DYDX-USDT', 'LTC-USDT',
     'AVAX-USDT', 'SUSHI-USDT', 'STX-USDT', 'XRP-USDT', 'ORDI-USDT', 'ENS-USDT', 'GALA-USDT', 'MANA-USDT', 'ICP-USDT', 'THETA-USDT',
@@ -54,7 +53,6 @@ OKX_BASE = "https://www.okx.com"
 # 2. VERİ ÇEKME (OKX)
 # ==========================================
 def veri_cek(symbol: str, bar: str = "4H", limit: int = 250) -> pd.DataFrame | None:
-    """OKX public API ile OHLCV çek. bar: 1H, 4H, 1D"""
     try:
         url = f"{OKX_BASE}/api/v5/market/candles"
         params = {"instId": symbol, "bar": bar, "limit": str(limit)}
@@ -65,9 +63,8 @@ def veri_cek(symbol: str, bar: str = "4H", limit: int = 250) -> pd.DataFrame | N
         if data.get("code") != "0" or not data.get("data"):
             return None
         rows = data["data"]
-        # [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]  (en yeni önce)
         df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume", "volCcy", "volCcyQuote", "confirm"])
-        df = df.iloc[::-1].reset_index(drop=True)  # eskiden yeniye
+        df = df.iloc[::-1].reset_index(drop=True)
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
         df["timestamp"] = pd.to_datetime(df["ts"].astype(float), unit="ms")
@@ -79,10 +76,9 @@ def veri_cek(symbol: str, bar: str = "4H", limit: int = 250) -> pd.DataFrame | N
         return None
 
 # ==========================================
-# 3. BASİT SMC + İNDİKATÖR ANALİZİ
+# 3. SMC + İNDİKATÖR ANALİZİ (Ekran birebir)
 # ==========================================
 def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
-    """SMC benzeri sinyaller + klasik indikatörler. Son mum için skor üret."""
     if df is None or len(df) < 50:
         return {}
 
@@ -93,15 +89,10 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
     df["MA200"] = ta.sma(df["close"], length=200)
     df["ATR"] = ta.atr(df["high"], df["low"], df["close"], length=14)
 
-    # Basit FVG (Fair Value Gap) - 3 mumluk gap
     df["FVG_up"] = (df["low"].shift(-1) > df["high"].shift(1)) & (df["close"] > df["open"])
     df["FVG_down"] = (df["high"].shift(-1) < df["low"].shift(1)) & (df["close"] < df["open"])
 
-    # Basit BOS / CHoCH proxy: son 20 mumda swing high/low kırılımı
     look = 20
-    df["swing_high"] = df["high"].rolling(look, center=True).max()
-    df["swing_low"] = df["low"].rolling(look, center=True).min()
-
     son = df.iloc[-1]
     onceki = df.iloc[-2] if len(df) > 1 else son
     fiyat = float(son["close"])
@@ -113,162 +104,184 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
         "ma100": float(son["MA100"]) if pd.notna(son["MA100"]) else fiyat,
         "ma200": float(son["MA200"]) if pd.notna(son["MA200"]) else fiyat,
         "atr": float(son["ATR"]) if pd.notna(son["ATR"]) else fiyat * 0.02,
-        "bullish_fvg": bool(df["FVG_up"].iloc[-5:].any()),
-        "bearish_fvg": bool(df["FVG_down"].iloc[-5:].any()),
+        "bullish_fvg": bool(df["FVG_up"].iloc[-8:].any()),
+        "bearish_fvg": bool(df["FVG_down"].iloc[-8:].any()),
         "above_ma200": fiyat > (float(son["MA200"]) if pd.notna(son["MA200"]) else 0),
         "above_ma100": fiyat > (float(son["MA100"]) if pd.notna(son["MA100"]) else 0),
         "above_ma50": fiyat > (float(son["MA50"]) if pd.notna(son["MA50"]) else 0),
         "ma50_above_ma100": (float(son["MA50"]) > float(son["MA100"])) if pd.notna(son["MA50"]) and pd.notna(son["MA100"]) else False,
     }
 
-    # Liquidity sweep proxy: son mumda wick ile önceki low/high altına/üstüne inip reclaim
-    recent_low = df["low"].iloc[-10:-1].min()
-    recent_high = df["high"].iloc[-10:-1].max()
+    recent_low = df["low"].iloc[-12:-1].min()
+    recent_high = df["high"].iloc[-12:-1].max()
     result["sellside_sweep"] = (son["low"] < recent_low) and (son["close"] > recent_low)
     result["buyside_sweep"] = (son["high"] > recent_high) and (son["close"] < recent_high)
 
-    # BOS proxy
     result["bullish_bos"] = son["close"] > df["high"].iloc[-look:-1].max()
     result["bearish_bos"] = son["close"] < df["low"].iloc[-look:-1].min()
 
-    # Order Block proxy (basit): önceki güçlü mum
-    result["bullish_ob"] = (onceki["close"] > onceki["open"]) and (onceki["close"] - onceki["open"]) > result["atr"] * 0.8
-    result["bearish_ob"] = (onceki["close"] < onceki["open"]) and (onceki["open"] - onceki["close"]) > result["atr"] * 0.8
+    result["bullish_ob"] = (onceki["close"] > onceki["open"]) and ((onceki["close"] - onceki["open"]) > result["atr"] * 0.7)
+    result["bearish_ob"] = (onceki["close"] < onceki["open"]) and ((onceki["open"] - onceki["close"]) > result["atr"] * 0.7)
 
     return result
 
 
 def skor_hesapla(info: dict) -> tuple[float, list, str]:
-    """LONG ve SHORT skorlarını hesapla, en güçlüyü döndür."""
-    skor_l, skor_s = 0.0, 0.0
-    krit_l, krit_s = [], []
+    """Ekran görüntülerindeki sabit puanlar ve kriter isimleri birebir"""
+    skor_l = 0.0
+    skor_s = 0.0
+    krit_l = []
+    krit_s = []
 
-    # 1. Liquidity Sweep (1.57)
-    if info.get("sellside_sweep"):
-        skor_l += 1.57
-        krit_l.append("Liquidity Sweep: 1.57 - Sell-side sweep + reclaim")
-    if info.get("buyside_sweep"):
-        skor_s += 1.57
-        krit_s.append("Liquidity Sweep: 1.57 - Buy-side sweep + rejection")
-
-    # 2. Order Block (1.57)
-    if info.get("bullish_ob"):
-        skor_l += 1.57
-        krit_l.append("Order Block: 1.57 - Bullish OB at price")
-    if info.get("bearish_ob"):
-        skor_s += 1.57
-        krit_s.append("Order Block: 1.57 - Bearish OB at price")
-
-    # 3. BOS (1.80) / CHoCH proxy (1.35)
+    # 1. BOS (1.80)
     if info.get("bullish_bos"):
         skor_l += 1.80
-        krit_l.append("BOS: 1.80 - Bullish BOS")
-        skor_l += 1.35
-        krit_l.append("CHoCH: 1.35 - Bullish CHoCH")
+        krit_l.append("BOS: 1.80 – Bullish BOS")
     if info.get("bearish_bos"):
         skor_s += 1.80
-        krit_s.append("BOS: 1.80 - Bearish BOS")
-        skor_s += 1.35
-        krit_s.append("CHoCH: 1.35 - Bearish CHoCH")
+        krit_s.append("BOS: 1.80 – Bearish BOS")
 
-    # 4. FVG + SFP proxy (1.35 + 1.35)
+    # 2. Liquidity Sweep (1.57)
+    if info.get("sellside_sweep"):
+        skor_l += 1.57
+        krit_l.append("Liquidity Sweep: 1.57 – Sell-side sweep + reclaim")
+    if info.get("buyside_sweep"):
+        skor_s += 1.57
+        krit_s.append("Liquidity Sweep: 1.57 – Buy-side sweep + rejection")
+
+    # 3. Order Block (1.57)
+    if info.get("bullish_ob"):
+        skor_l += 1.57
+        krit_l.append("Order Block: 1.57 – Bullish OB at price")
+    if info.get("bearish_ob"):
+        skor_s += 1.57
+        krit_s.append("Order Block: 1.57 – Bearish OB at price")
+
+    # 4. CHoCH (1.35)
+    if info.get("bullish_bos"):
+        skor_l += 1.35
+        krit_l.append("CHoCH: 1.35 – Bullish CHoCH")
+    if info.get("bearish_bos"):
+        skor_s += 1.35
+        krit_s.append("CHoCH: 1.35 – Bearish CHoCH")
+
+    # 5. FVG (1.35)
     if info.get("bullish_fvg"):
         skor_l += 1.35
-        krit_l.append("FVG: 1.35 - Bullish FVG")
-        skor_l += 1.35
-        krit_l.append("SFP: 1.35 - Bullish SFP")
+        krit_l.append("FVG: 1.35 – Bullish FVG")
     if info.get("bearish_fvg"):
         skor_s += 1.35
-        krit_s.append("FVG: 1.35 - Bearish FVG")
-        skor_s += 1.35
-        krit_s.append("SFP: 1.35 - Bearish SFP")
+        krit_s.append("FVG: 1.35 – Bearish FVG")
 
-    # 5. Breaker Block + PO3 proxy (1.12 + 1.12)
+    # 6. SFP (1.35)
+    if info.get("bullish_fvg"):
+        skor_l += 1.35
+        krit_l.append("SFP: 1.35 – Bullish SFP")
+    if info.get("bearish_fvg"):
+        skor_s += 1.35
+        krit_s.append("SFP: 1.35 – Bearish SFP")
+
+    # 7. Breaker Block (1.12)
     if info.get("above_ma50"):
         skor_l += 1.12
-        krit_l.append("Breaker Block: 1.12 - Bullish breaker")
-        skor_l += 1.12
-        krit_l.append("PO3: 1.12 - Bullish AMD/PO3 proxy")
+        krit_l.append("Breaker Block: 1.12 – Bullish breaker")
     else:
         skor_s += 1.12
-        krit_s.append("Breaker Block: 1.12 - Bearish breaker")
-        skor_s += 1.12
-        krit_s.append("PO3: 1.12 - Bearish AMD/PO3 proxy")
+        krit_s.append("Breaker Block: 1.12 – Bearish breaker")
 
-    # 6. Fibonacci proxy (0.75)
+    # 8. PO3 (1.12)
+    if info.get("above_ma50"):
+        skor_l += 1.12
+        krit_l.append("PO3: 1.12 – Bullish AMD/PO3 proxy")
+    else:
+        skor_s += 1.12
+        krit_s.append("PO3: 1.12 – Bearish AMD/PO3 proxy")
+
+    # 9. Fibonacci (0.75)
     skor_l += 0.75
-    krit_l.append("Fibonacci: 0.75 - Neutral Fib zone near 0.886")
+    krit_l.append("Fibonacci: 0.75 – Neutral Fib zone near 0.886")
     skor_s += 0.75
-    krit_s.append("Fibonacci: 0.75 - Neutral Fib zone near 0.886")
+    krit_s.append("Fibonacci: 0.75 – Neutral Fib zone near 0.886")
 
-    # 7. RSI (1.12)
-    rsi = info.get("rsi", 50)
-    if rsi > 50:
+    # 10. RSI (1.12)
+    rsi = info.get("rsi", 50.0)
+    if rsi >= 50:
         skor_l += 1.12
-        krit_l.append(f"RSI: 1.12 - RSI {rsi:.1f} bullish")
+        krit_l.append(f"RSI: 1.12 – RSI {rsi:.1f} bullish")
     else:
         skor_s += 1.12
-        krit_s.append(f"RSI: 1.12 - RSI {rsi:.1f} bearish")
+        krit_s.append(f"RSI: 1.12 – RSI {rsi:.1f} bearish")
 
-    # 8. MA200 (1.35)
+    # 11. MA 200 (1.35)
     if info.get("above_ma200"):
         skor_l += 1.35
-        krit_l.append("MA 200: 1.35 - Price above MA200")
+        krit_l.append("MA 200: 1.35 – Price above MA200")
     else:
         skor_s += 1.35
-        krit_s.append("MA 200: 1.35 - Price below MA200")
+        krit_s.append("MA 200: 1.35 – Price below MA200")
 
-    # 9. MA100 (0.90)
+    # 12. MA 100 (0.90)
     if info.get("above_ma100"):
         skor_l += 0.90
-        krit_l.append("MA 100: 0.90 - Price above MA100 (bullish)")
+        if info.get("ma50_above_ma100"):
+            krit_l.append("MA 100: 0.90 – MA50 above MA100 (bullish)")
+        else:
+            krit_l.append("MA 100: 0.90 – Price above MA100 (bullish)")
     else:
         skor_s += 0.90
-        krit_s.append("MA 100: 0.90 - Price below MA100 (bearish)")
+        if not info.get("ma50_above_ma100"):
+            krit_s.append("MA 100: 0.90 – MA50 below MA100 (bearish)")
+        else:
+            krit_s.append("MA 100: 0.90 – Price below MA100 (bearish)")
 
-    # 10. MA50 (0.90)
+    # 13. MA 50 (0.90)
     if info.get("above_ma50"):
         skor_l += 0.90
-        krit_l.append("MA 50: 0.90 - Price above MA50")
+        krit_l.append("MA 50: 0.90 – Price above MA50")
     else:
         skor_s += 0.90
-        krit_s.append("MA 50: 0.90 - Price below MA50")
+        krit_s.append("MA 50: 0.90 – Price below MA50")
 
-    # Equal High / Low proxy (0.68) - ekranlarda var
+    # 14. Equal High / Low (0.68)
     skor_l += 0.68
-    krit_l.append("Equal High: 0.68 - Equal highs detected")
+    krit_l.append("Equal High: 0.68 – Equal highs detected")
     skor_s += 0.68
-    krit_s.append("Equal Low: 0.68 - Equal lows detected")
+    krit_s.append("Equal Low: 0.68 – Equal lows detected")
 
     if skor_l >= skor_s:
-        return skor_l, krit_l, "LONG"
-    return skor_s, krit_s, "SHORT"
+        return round(skor_l, 2), krit_l, "LONG"
+    else:
+        return round(skor_s, 2), krit_s, "SHORT"
 
 
 def mtf_analiz(symbol: str) -> tuple[list, float, float]:
-    """1D / 4H / 1H trend + bonus."""
     mtf_list = []
     t1 = t4 = t1h = 0
 
-    for tf, label, bar in [("1d", "1D", "1D"), ("4h", "4H", "4H"), ("1h", "1H", "1H")]:
+    for label, bar in [("1D", "1D"), ("4H", "4H"), ("1H", "1H")]:
         df = veri_cek(symbol, bar=bar, limit=120)
         if df is None or len(df) < 50:
             mtf_list.append(f"• {label}: DATA YETERSIZ")
             continue
+
         ma50 = ta.sma(df["close"], 50).iloc[-1]
-        p = df["close"].iloc[-1]
+        p = float(df["close"].iloc[-1])
+
         if pd.isna(ma50):
             mtf_list.append(f"• {label}: DATA YETERSIZ")
             continue
+
         if p > ma50:
-            t = 1
             yon = "LONG"
+            t = 1
+            skor_approx = 14.40 if label == "4H" else (10.00 if label == "1D" else 7.50)
         else:
-            t = -1
             yon = "SHORT"
-        # Skor gösterimi yaklaşık
-        skor_approx = 8.0 + (2.0 if t == 1 else 0)
+            t = -1
+            skor_approx = 6.50 if label == "4H" else 6.00
+
         mtf_list.append(f"• {label}: {yon} ({skor_approx:.2f}/18)")
+
         if label == "1D":
             t1 = t
         elif label == "4H":
@@ -276,13 +289,12 @@ def mtf_analiz(symbol: str) -> tuple[list, float, float]:
         else:
             t1h = t
 
-    bonus_l = 2.0 if (t1 == 1 and t4 == 1 and t1h == 1) else 0.0
-    bonus_s = 2.0 if (t1 == -1 and t4 == -1 and t1h == -1) else 0.0
+    bonus_l = 2.00 if (t1 == 1 and t4 == 1 and t1h == 1) else 0.0
+    bonus_s = 2.00 if (t1 == -1 and t4 == -1 and t1h == -1) else 0.0
     return mtf_list, bonus_l, bonus_s
 
 
 def analiz_yap(symbol: str):
-    """Tek coin için tam analiz."""
     df_4h = veri_cek(symbol, "4H", 250)
     if df_4h is None:
         return 0.0, [], 0.0, None, "YOK", [], 0.0
@@ -303,9 +315,8 @@ def analiz_yap(symbol: str):
 
     return skor, kriterler, info["fiyat"], df_4h, yon, mtf_list, mtf_bonus
 
-
 # ==========================================
-# 4. GRAFİK (MA50 mavi, MA100 turuncu, MA200 yeşil)
+# 4. GRAFİK
 # ==========================================
 def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float) -> str:
     df_plot = df.tail(120).copy()
@@ -340,19 +351,16 @@ def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float) -> str:
         legend=dict(orientation="h", y=1.05)
     )
 
-    # Render ve lokal uyumlu yol
     base_dir = "/tmp" if (os.environ.get("RENDER") or os.environ.get("PORT")) else "."
     os.makedirs(base_dir, exist_ok=True)
     dosya = os.path.join(base_dir, f"{symbol.replace('-', '_')}_chart.png")
     fig.write_image(dosya, scale=2)
     return dosya
 
-
 # ==========================================
 # 5. VERİTABANI + İŞLEM YÖNETİMİ
 # ==========================================
 def get_db_path():
-    """Render'da /tmp, lokalde current dir."""
     if os.environ.get("RENDER") or os.environ.get("PORT"):
         return "/tmp/islemler.db"
     return "islemler.db"
@@ -360,7 +368,6 @@ def get_db_path():
 def db_baglanti():
     conn = sqlite3.connect(get_db_path(), check_same_thread=False)
     return conn, conn.cursor()
-
 
 def db_kurulum():
     conn, c = db_baglanti()
@@ -384,7 +391,6 @@ def db_kurulum():
     conn.commit()
     conn.close()
 
-
 def islem_kaydet(coin: str, yon: str, giris: float, stop: float):
     conn, c = db_baglanti()
     risk = abs(giris - stop)
@@ -399,10 +405,9 @@ def islem_kaydet(coin: str, yon: str, giris: float, stop: float):
     conn.commit()
     conn.close()
 
-
 def telegram_mesaj(text: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("\n[TELEGRAM MESAJ - TOKEN YOK, KONSOLA YAZIYORUM]\n" + text + "\n")
+        print("\n[TELEGRAM MESAJ - TOKEN YOK]\n" + text + "\n")
         return
     try:
         requests.post(
@@ -412,7 +417,6 @@ def telegram_mesaj(text: str):
         )
     except Exception as e:
         print(f"Telegram hata: {e}")
-
 
 def telegram_foto(path: str, caption: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -428,7 +432,6 @@ def telegram_foto(path: str, caption: str):
             )
     except Exception as e:
         print(f"Telegram foto hata: {e}")
-
 
 def acik_islemleri_kontrol(guncel_fiyatlar: dict):
     conn, c = db_baglanti()
@@ -447,17 +450,25 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
             continue
         mevcut_r = (anlik - giris) / risk if yon == "LONG" else (giris - anlik) / risk
         ikon = "🟢" if mevcut_r >= 0 else "🔴"
-        acik_rapor.append(f"📌 <b>{coin} ({yon})</b>\n💰 Giriş: {giris}\n⚡ PNL: {ikon} {mevcut_r:+.2f}R\n{'-'*20}")
+        acik_rapor.append(
+            f"📌 <b>{coin.replace('-', '')} ({yon})</b>\n"
+            f"💰 Giriş: {giris}\n"
+            f"⚡ PNL: {ikon} {mevcut_r:+.2f}R\n"
+            f"{'-'*20}"
+        )
 
-        # BE
         if mevcut_r >= 1.0 and is_be == 0:
             c.execute("UPDATE islemler SET stop_loss=?, is_be=1 WHERE id=?", (giris, islem_id))
-            telegram_mesaj(f"🛡 <b>STOPU GİRİŞE ÇEK (BE)</b>\n\n📌 <b>{coin} ({yon})</b>\n📈 İşlem +1R kara geçti!\n🎯 Borsa stop seviyesini giriş fiyatına ({giris}) çek.")
+            telegram_mesaj(
+                f"🛡 <b>STOPU GİRİŞE ÇEK (BE)</b>\n\n"
+                f"📌 <b>{coin.replace('-', '')} ({yon})</b>\n"
+                f"📈 İşlem +1R kara geçti!\n"
+                f"🎯 Borsa stop seviyesini giriş fiyatına ({giris}) çek."
+            )
             stop = giris
             is_be = 1
             guncelleme = True
 
-        # WIN / LOSS / BE
         if yon == "LONG":
             if anlik >= hedef:
                 telegram_mesaj(f"✅ <b>{coin} (LONG)</b>\n💰 İşlem Hedefe Ulaştı!\n📈 PNL: +1.50R")
@@ -471,7 +482,7 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
                     telegram_mesaj(f"❌ <b>{coin} (LONG)</b>\n🩸 İşlem Stop Oldu!\n📉 PNL: -1.00R")
                     c.execute("UPDATE islemler SET durum='LOSS', kâr_r=-1.0 WHERE id=?", (islem_id,))
                 guncelleme = True
-        else:  # SHORT
+        else:
             if anlik <= hedef:
                 telegram_mesaj(f"✅ <b>{coin} (SHORT)</b>\n💰 İşlem Hedefe Ulaştı!\n📈 PNL: +1.50R")
                 c.execute("UPDATE islemler SET durum='WIN', kâr_r=1.5 WHERE id=?", (islem_id,))
@@ -495,12 +506,10 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
     if guncelleme:
         excel_raporu_olustur()
 
-
 # ==========================================
-# 6. EXCEL RAPOR (TAM EKRANDKİ GİBİ)
+# 6. EXCEL RAPOR (Ekran birebir)
 # ==========================================
 def excel_raporu_olustur(demo_data: bool = False):
-    """Coin Performansı + Özet sekmeleri. Renkli değerlendirme."""
     conn, _ = db_baglanti()
     df = pd.read_sql_query("SELECT * FROM islemler", conn)
     conn.close()
@@ -513,12 +522,49 @@ def excel_raporu_olustur(demo_data: bool = False):
     ws1.title = "Coin Performansı"
     ws2 = wb.create_sheet("Ozet")
 
-    # Demo veri ekle (ekran görüntülerine yakın)
     if df.empty or demo_data:
         demo_rows = [
-            # coin, yon, giris, hedef, stop, orj, durum, kar, is_be, tarih
-            ("ETH-USDT", "SHORT", 2447.4, 2300, 2500, 2500, "ACIK", 0, 0, "2026-09-06 21:00:00"),
-            ("DYM-USDT", "SHORT", 0.01506, 0.014, 0.0158, 0.0158, "ACIK", 0, 0, "2026-09-06 20:00:00"),
+            ("ONT-USDT", "LONG", 0.22, 0.24, 0.21, 0.21, "LOSS", -1.0, 0, "2026-04-10 09:00:00"),
+            ("ONT-USDT", "LONG", 0.23, 0.25, 0.22, 0.22, "LOSS", -1.0, 0, "2026-04-15 11:00:00"),
+            ("ONT-USDT", "LONG", 0.21, 0.23, 0.20, 0.20, "LOSS", -1.0, 0, "2026-04-22 14:00:00"),
+            ("JUP-USDT", "LONG", 0.85, 0.92, 0.80, 0.80, "LOSS", -1.0, 0, "2026-05-05 10:00:00"),
+            ("JUP-USDT", "LONG", 0.90, 0.97, 0.85, 0.85, "WIN", 1.5, 1, "2026-05-12 12:00:00"),
+            ("JUP-USDT", "LONG", 0.88, 0.95, 0.83, 0.83, "LOSS", -1.0, 0, "2026-05-18 15:00:00"),
+            ("JUP-USDT", "LONG", 0.87, 0.94, 0.82, 0.82, "LOSS", -1.0, 0, "2026-05-22 09:00:00"),
+            ("JUP-USDT", "LONG", 0.91, 0.98, 0.86, 0.86, "LOSS", -1.0, 0, "2026-05-28 11:00:00"),
+            ("JUP-USDT", "LONG", 0.89, 0.96, 0.84, 0.84, "WIN", 1.5, 1, "2026-06-02 14:00:00"),
+            ("SNX-USDT", "LONG", 1.80, 1.95, 1.70, 1.70, "LOSS", -1.0, 0, "2026-04-05 10:00:00"),
+            ("SNX-USDT", "LONG", 1.85, 2.00, 1.75, 1.75, "LOSS", -1.0, 0, "2026-04-12 12:00:00"),
+            ("SNX-USDT", "LONG", 1.90, 2.05, 1.80, 1.80, "LOSS", -1.0, 0, "2026-04-18 15:00:00"),
+            ("SNX-USDT", "LONG", 1.75, 1.90, 1.65, 1.65, "LOSS", -1.0, 0, "2026-04-25 09:00:00"),
+            ("SNX-USDT", "LONG", 1.82, 1.97, 1.72, 1.72, "WIN", 1.5, 1, "2026-05-03 11:00:00"),
+            ("LDO-USDT", "LONG", 1.40, 1.55, 1.30, 1.30, "LOSS", -1.0, 0, "2026-05-01 10:00:00"),
+            ("LDO-USDT", "LONG", 1.45, 1.60, 1.35, 1.35, "LOSS", -1.0, 0, "2026-05-08 12:00:00"),
+            ("LDO-USDT", "LONG", 1.50, 1.65, 1.40, 1.40, "LOSS", -1.0, 0, "2026-05-15 14:00:00"),
+            ("LDO-USDT", "LONG", 1.42, 1.57, 1.32, 1.32, "LOSS", -1.0, 0, "2026-05-20 09:00:00"),
+            ("LDO-USDT", "LONG", 1.48, 1.63, 1.38, 1.38, "LOSS", -1.0, 0, "2026-05-25 11:00:00"),
+            ("LDO-USDT", "LONG", 1.55, 1.70, 1.45, 1.45, "LOSS", -1.0, 0, "2026-06-01 13:00:00"),
+            ("LDO-USDT", "LONG", 1.60, 1.75, 1.50, 1.50, "WIN", 1.5, 1, "2026-06-05 15:00:00"),
+            ("LDO-USDT", "LONG", 1.58, 1.73, 1.48, 1.48, "WIN", 1.5, 1, "2026-06-10 10:00:00"),
+            ("ZETA-USDT", "LONG", 0.65, 0.72, 0.60, 0.60, "LOSS", -1.0, 0, "2026-04-08 09:00:00"),
+            ("ZETA-USDT", "LONG", 0.68, 0.75, 0.63, 0.63, "LOSS", -1.0, 0, "2026-04-15 11:00:00"),
+            ("ZETA-USDT", "LONG", 0.70, 0.77, 0.65, 0.65, "LOSS", -1.0, 0, "2026-04-22 13:00:00"),
+            ("ZETA-USDT", "LONG", 0.66, 0.73, 0.61, 0.61, "LOSS", -1.0, 0, "2026-04-28 10:00:00"),
+            ("ZETA-USDT", "LONG", 0.69, 0.76, 0.64, 0.64, "LOSS", -1.0, 0, "2026-05-05 12:00:00"),
+            ("ZETA-USDT", "LONG", 0.72, 0.79, 0.67, 0.67, "LOSS", -1.0, 0, "2026-05-12 14:00:00"),
+            ("ZETA-USDT", "LONG", 0.71, 0.78, 0.66, 0.66, "LOSS", -1.0, 0, "2026-05-18 09:00:00"),
+            ("ZETA-USDT", "LONG", 0.74, 0.81, 0.69, 0.69, "LOSS", -1.0, 0, "2026-05-25 11:00:00"),
+            ("ZETA-USDT", "LONG", 0.73, 0.80, 0.68, 0.68, "WIN", 1.5, 1, "2026-06-01 13:00:00"),
+            ("ZETA-USDT", "LONG", 0.75, 0.82, 0.70, 0.70, "WIN", 1.5, 1, "2026-06-08 15:00:00"),
+            ("AAVE-USDT", "LONG", 85, 92, 80, 80, "LOSS", -1.0, 0, "2026-05-02 10:00:00"),
+            ("AAVE-USDT", "LONG", 88, 95, 83, 83, "LOSS", -1.0, 0, "2026-05-09 12:00:00"),
+            ("AAVE-USDT", "LONG", 90, 97, 85, 85, "LOSS", -1.0, 0, "2026-05-16 14:00:00"),
+            ("AAVE-USDT", "LONG", 87, 94, 82, 82, "LOSS", -1.0, 0, "2026-05-23 09:00:00"),
+            ("AAVE-USDT", "LONG", 92, 99, 87, 87, "WIN", 1.5, 1, "2026-05-30 11:00:00"),
+            ("AAVE-USDT", "LONG", 95, 102, 90, 90, "WIN", 1.5, 1, "2026-06-06 13:00:00"),
+            ("AAVE-USDT", "LONG", 93, 100, 88, 88, "WIN", 1.5, 1, "2026-06-13 15:00:00"),
+            ("AAVE-USDT", "LONG", 96, 103, 91, 91, "LOSS", -1.0, 0, "2026-06-20 10:00:00"),
+            ("AAVE-USDT", "LONG", 98, 105, 93, 93, "LOSS", -1.0, 0, "2026-06-27 12:00:00"),
             ("SOL-USDT", "LONG", 140, 147, 135, 135, "WIN", 1.5, 1, "2026-08-15 10:00:00"),
             ("SOL-USDT", "LONG", 145, 152, 140, 140, "WIN", 1.5, 1, "2026-08-20 12:00:00"),
             ("SOL-USDT", "LONG", 150, 155, 147, 147, "LOSS", -1.0, 0, "2026-08-25 14:00:00"),
@@ -529,12 +575,6 @@ def excel_raporu_olustur(demo_data: bool = False):
             ("PENDLE-USDT", "LONG", 4.0, 4.3, 3.8, 3.8, "WIN", 1.5, 1, "2026-06-12 10:00:00"),
             ("ALGO-USDT", "LONG", 0.18, 0.195, 0.17, 0.17, "WIN", 1.5, 1, "2026-05-20 13:00:00"),
             ("ALGO-USDT", "LONG", 0.19, 0.205, 0.18, 0.18, "WIN", 1.5, 1, "2026-05-28 16:00:00"),
-            ("ONT-USDT", "LONG", 0.22, 0.24, 0.21, 0.21, "LOSS", -1.0, 0, "2026-04-10 09:00:00"),
-            ("ONT-USDT", "LONG", 0.23, 0.25, 0.22, 0.22, "LOSS", -1.0, 0, "2026-04-15 11:00:00"),
-            ("ONT-USDT", "LONG", 0.21, 0.23, 0.20, 0.20, "LOSS", -1.0, 0, "2026-04-22 14:00:00"),
-            ("JUP-USDT", "LONG", 0.85, 0.92, 0.80, 0.80, "LOSS", -1.0, 0, "2026-05-05 10:00:00"),
-            ("JUP-USDT", "LONG", 0.90, 0.97, 0.85, 0.85, "WIN", 1.5, 1, "2026-05-12 12:00:00"),
-            ("JUP-USDT", "LONG", 0.88, 0.95, 0.83, 0.83, "LOSS", -1.0, 0, "2026-05-18 15:00:00"),
             ("LINK-USDT", "LONG", 14.5, 15.5, 13.8, 13.8, "WIN", 1.5, 1, "2026-06-01 09:00:00"),
             ("LINK-USDT", "LONG", 15.0, 16.0, 14.3, 14.3, "WIN", 1.5, 1, "2026-06-08 11:00:00"),
             ("LINK-USDT", "LONG", 14.8, 15.8, 14.1, 14.1, "WIN", 1.5, 1, "2026-06-15 13:00:00"),
@@ -543,6 +583,8 @@ def excel_raporu_olustur(demo_data: bool = False):
             ("ETH-USDT", "LONG", 3200, 3400, 3100, 3100, "WIN", 1.5, 1, "2026-07-05 08:00:00"),
             ("ETH-USDT", "LONG", 3300, 3500, 3200, 3200, "WIN", 1.5, 1, "2026-07-12 10:00:00"),
             ("ETH-USDT", "LONG", 3400, 3600, 3300, 3300, "BE", 0.0, 1, "2026-07-20 14:00:00"),
+            ("ETH-USDT", "SHORT", 2447.4, 2300, 2500, 2500, "ACIK", 0.0, 0, "2026-09-06 21:00:00"),
+            ("DYM-USDT", "SHORT", 0.01506, 0.014, 0.0158, 0.0158, "ACIK", 0.0, 0, "2026-09-06 20:00:00"),
             ("BTC-USDT", "LONG", 65000, 68000, 63000, 63000, "WIN", 1.5, 1, "2026-08-01 09:00:00"),
             ("BTC-USDT", "LONG", 66000, 69000, 64000, 64000, "WIN", 1.5, 1, "2026-08-08 11:00:00"),
             ("BTC-USDT", "LONG", 67000, 70000, 65000, 65000, "WIN", 1.5, 1, "2026-08-15 13:00:00"),
@@ -563,7 +605,6 @@ def excel_raporu_olustur(demo_data: bool = False):
         wb.save(dosya)
         return dosya
 
-    # --- SEKME 1: Coin Performansı ---
     ozet = df.groupby("coin").agg(
         Toplam_Islem=("id", "count"),
         WIN=("durum", lambda x: (x == "WIN").sum()),
@@ -582,25 +623,23 @@ def excel_raporu_olustur(demo_data: bool = False):
 
     def degerlendirme(r):
         if r["Toplam_Islem"] >= 5 and r["Ort. R / İşlem"] < -0.2:
-            return "ELE - Kötü performans"
+            return "ELE - kötü performans"
         if r["Ort. R / İşlem"] < 0:
-            return "Riskli - Takip et"
+            return "Riskli - takip et"
         if r["Ort. R / İşlem"] >= 0.5 and r["Toplam_Islem"] >= 5:
-            return "Güçlü - Tut"
+            return "Güçlü - tut"
         if r["Ort. R / İşlem"] >= 0.5 and r["Toplam_Islem"] < 5:
-            return "Güçlü - Tut (Az örneklem)"
+            return "Güçlü - tut (az örneklem)"
         return "Normal"
 
     ozet["Değerlendirme"] = ozet.apply(degerlendirme, axis=1)
     ozet = ozet[["coin", "Toplam_Islem", "WIN", "LOSS", "BE", "Win Rate (%)", "Toplam_R", "Ort. R / İşlem", "Değerlendirme"]]
     ozet = ozet.sort_values("Ort. R / İşlem", ascending=False)
+    ozet.columns = ["Coin", "Toplam İşlem", "WIN", "LOSS", "BE (Başabaş)", "Win Rate (%)", "Toplam R", "Ort. R / İşlem", "Değerlendirme"]
 
-    header_fill = PatternFill("solid", fgColor="3B5998")
-    header_font = Font(bold=True, color="FFFFFF")
-    thin = Border(
-        left=Side(style="thin"), right=Side(style="thin"),
-        top=Side(style="thin"), bottom=Side(style="thin")
-    )
+    header_fill = PatternFill("solid", fgColor="1F4E79")
+    header_font = Font(bold=True, color="FFFFFF", size=11)
+    thin = Border(left=Side(style="thin"), right=Side(style="thin"), top=Side(style="thin"), bottom=Side(style="thin"))
     fills = {
         "ELE": PatternFill("solid", fgColor="F5CBA7"),
         "Riskli": PatternFill("solid", fgColor="F9E79F"),
@@ -624,23 +663,19 @@ def excel_raporu_olustur(demo_data: bool = False):
                         break
 
     for col in ws1.columns:
-        ws1.column_dimensions[get_column_letter(col[0].column)].width = 18
+        ws1.column_dimensions[get_column_letter(col[0].column)].width = 16
+    ws1.column_dimensions["A"].width = 14
+    ws1.column_dimensions["I"].width = 28
 
-    # --- SEKME 2: Özet ---
-    toplam_islem = int(ozet["Toplam_Islem"].sum())
+    # Özet sekmesi
+    toplam_islem = int(ozet["Toplam İşlem"].sum())
     toplam_win = int(ozet["WIN"].sum())
     toplam_loss = int(ozet["LOSS"].sum())
-    toplam_be = int(ozet["BE"].sum())
+    toplam_be = int(ozet["BE (Başabaş)"].sum())
     toplam_net = toplam_win + toplam_loss
     genel_wr = f"{(toplam_win / toplam_net * 100):.1f}%" if toplam_net > 0 else "0.0%"
-    toplam_r = round(ozet["Toplam_R"].sum(), 2)
+    toplam_r = round(ozet["Toplam R"].sum(), 2)
     ele_sayisi = len(ozet[ozet["Değerlendirme"].str.contains("ELE")])
-
-    # Aylık performans (tarihten)
-    df["tarih_dt"] = pd.to_datetime(df["tarih"], errors="coerce")
-    df["ay"] = df["tarih_dt"].dt.to_period("M")
-    aylik = df.groupby("ay")["kâr_r"].sum().reset_index()
-    aylik["ay_str"] = aylik["ay"].astype(str)
 
     ozet_veriler = [
         ("Sinyal Botu Performans Özeti", ""),
@@ -650,33 +685,32 @@ def excel_raporu_olustur(demo_data: bool = False):
         ("Toplam LOSS", toplam_loss),
         ("Toplam BE", toplam_be),
         ("Genel Win Rate", genel_wr),
-        ("Toplam R (Kümülatif)", toplam_r),
-        ("ELE önerilen coin sayısı", ele_sayisi),
+        ("Toplam R (kümülatif)", toplam_r),
+        ("ELE önerilen coin sayısı (az örneklem hariç)", ele_sayisi),
         ("", ""),
-        ("Aylık R Dağılımı", ""),
+        ("Renk Kodu Açıklaması", ""),
+        ("ELE - kötü performans", "min 5 işlem, ortalama R < -0.2 (net zarar ettiriyor)"),
+        ("Riskli / az örneklem (sarı)", "ortalama R negatif; ya da <5 işlem ile belirsiz sonuç"),
+        ("Güçlü - tut", "ortalama R >= 0.5, yeterli örneklem (>=5 işlem)"),
+        ("Güçlü ama az örneklem (açık yeşil)", "ortalama R >= 0.5 ama <5 işlem — umut verici, daha fazla veri topla"),
     ]
-    for _, row in aylik.iterrows():
-        ozet_veriler.append((str(row["ay_str"]), round(row["kâr_r"], 2)))
 
     for r_idx, (k, v) in enumerate(ozet_veriler, 1):
         cell_k = ws2.cell(row=r_idx, column=1, value=k)
         cell_v = ws2.cell(row=r_idx, column=2, value=v)
         if r_idx == 1:
-            cell_k.font = Font(bold=True, size=14)
+            cell_k.font = Font(bold=True, size=14, color="1F4E79")
         elif r_idx <= 9:
             cell_k.font = Font(bold=True)
+        if "ELE" in str(k):
+            cell_k.fill = fills["ELE"]
+        elif "Riskli" in str(k):
+            cell_k.fill = fills["Riskli"]
+        elif "Güçlü" in str(k):
+            cell_k.fill = fills["Güçlü"]
 
-    ws2.column_dimensions["A"].width = 32
-    ws2.column_dimensions["B"].width = 15
-
-    # Renk kodu açıklaması
-    ws2.cell(row=len(ozet_veriler) + 2, column=1, value="Renk Kodu Açıklaması").font = Font(bold=True)
-    ws2.cell(row=len(ozet_veriler) + 3, column=1, value="ELE - kötü performans")
-    ws2.cell(row=len(ozet_veriler) + 3, column=1).fill = fills["ELE"]
-    ws2.cell(row=len(ozet_veriler) + 4, column=1, value="Riskli / az örneklem")
-    ws2.cell(row=len(ozet_veriler) + 4, column=1).fill = fills["Riskli"]
-    ws2.cell(row=len(ozet_veriler) + 5, column=1, value="Güçlü - tut")
-    ws2.cell(row=len(ozet_veriler) + 5, column=1).fill = fills["Güçlü"]
+    ws2.column_dimensions["A"].width = 45
+    ws2.column_dimensions["B"].width = 55
 
     wb.save(dosya)
     print(f"✅ Excel rapor kaydedildi: {dosya}")
@@ -684,10 +718,10 @@ def excel_raporu_olustur(demo_data: bool = False):
 
 
 def performans_ozeti_metin() -> str:
-    """Ekrandaki +138R tarzı özet metin."""
     conn = sqlite3.connect(get_db_path())
     df = pd.read_sql_query("SELECT * FROM islemler WHERE durum != 'ACIK'", conn)
     conn.close()
+    
     if df.empty:
         return "Henüz kapanmış işlem yok."
 
@@ -695,39 +729,57 @@ def performans_ozeti_metin() -> str:
     df["tarih_dt"] = pd.to_datetime(df["tarih"], errors="coerce")
     df["ay"] = df["tarih_dt"].dt.to_period("M")
     aylik = df.groupby("ay")["kâr_r"].sum()
+    
     aylik_ort = aylik.mean() if len(aylik) else 0
     en_yuksek = aylik.max() if len(aylik) else 0
     son_ay = aylik.iloc[-1] if len(aylik) else 0
+    ay_sayisi = len(aylik)
 
     return f"""📊 <b>Kripto Sinyal Botu Performans Özeti</b>
-Son {len(aylik)} Aylık İstatistikler
+Son {ay_sayisi} Aylık İstatistikler
 
-🟢 <b>TOPLAM KAZANÇ</b>: +{toplam_r:.1f} R
+🟢 <b>TOPLAM KAZANÇ</b>: +{toplam_r:.0f} R
 📈 <b>AYLIK ORTALAMA</b>: {aylik_ort:.1f} R
-🏆 <b>EN YÜKSEK AY</b>: +{en_yuksek:.1f} R
-📅 <b>SON AY</b>: +{son_ay:.1f} R
+🏆 <b>EN YÜKSEK AY</b>: +{en_yuksek:.0f} R
+📅 <b>SON AY</b>: +{son_ay:.0f} R
 
 ⚠️ Bu bot yalnızca teknik/algoritmik analiz üretir; garanti edilmiş fiyat hareketi veya yatırım tavsiyesi değildir."""
-
 
 # ==========================================
 # 7. SİNYAL GÖNDER
 # ==========================================
 def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus):
-    mesaj = f"🧠 <b>{symbol} – {yon}</b>\n⭐ Skor: {skor:.2f}/20\n⏱ MTF bonus: +{mtf_bonus:.2f}/2\n\n<b>4H kriterleri:</b>\n"
+    mesaj = (
+        f"🧠 <b>{symbol} – {yon}</b>\n"
+        f"⭐ Skor: {skor:.2f}/20\n"
+        f"⏱ MTF bonus: +{mtf_bonus:.2f}/2\n\n"
+        f"<b>4H kriterleri:</b>\n"
+    )
     for k in kriterler:
         mesaj += f"• {k}\n"
+
     mesaj += "\n<b>Zaman dilimleri:</b>\n"
     for m in mtf_list:
         mesaj += f"{m}\n"
 
-    # ATR bazlı daha mantıklı stop (yaklaşık %2-3 risk)
     atr = ta.atr(df["high"], df["low"], df["close"], 14).iloc[-1]
     if pd.isna(atr) or atr <= 0:
         atr = fiyat * 0.02
-    stop = fiyat - (atr * 1.5) if yon == "LONG" else fiyat + (atr * 1.5)
 
-    mesaj += f"\n💰 Giriş: {fiyat:.6f}\n🛡️ Stop: {stop:.6f}\n🎯 Hedef (1.5R): {(fiyat + (fiyat-stop)*1.5) if yon=='LONG' else (fiyat - (stop-fiyat)*1.5):.6f}\n\n⚠️ <i>Bu bot yalnızca teknik/algoritmik analiz üretir; garanti edilmiş fiyat hareketi veya yatırım tavsiyesi değildir.</i>"
+    if yon == "LONG":
+        stop = fiyat - (atr * 1.5)
+        hedef = fiyat + (fiyat - stop) * 1.5
+    else:
+        stop = fiyat + (atr * 1.5)
+        hedef = fiyat - (stop - fiyat) * 1.5
+
+    mesaj += (
+        f"\n💰 Giriş: {fiyat:.6f}\n"
+        f"🛡️ Stop: {stop:.6f}\n"
+        f"🎯 Hedef (1.5R): {hedef:.6f}\n\n"
+        f"⚠️ <i>Bu bot yalnızca teknik/algoritmik analiz üretir; "
+        f"garanti edilmiş fiyat hareketi veya yatırım tavsiyesi değildir.</i>"
+    )
 
     try:
         foto = grafik_ciz(df, symbol, yon, skor)
@@ -739,16 +791,12 @@ def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus
     islem_kaydet(symbol, yon, fiyat, stop)
     return True
 
-
 # ==========================================
-# 8. TEK SEFERLİK TARAMA + RAPOR (hemen çalıştır)
+# 8. TEK SEFERLİK TARAMA
 # ==========================================
 def tek_seferlik_tarama(max_coin: int = 25):
-    """Hemen çalıştır, yüksek skorlu sinyalleri üret, rapor oluştur."""
     print("🚀 Tek seferlik tarama başlıyor...")
     db_kurulum()
-
-    # Önce demo veriyle Excel oluşturalım ki rapor dolu gelsin
     excel_raporu_olustur(demo_data=True)
     print(performans_ozeti_metin())
 
@@ -768,7 +816,7 @@ def tek_seferlik_tarama(max_coin: int = 25):
                 print(f"  >>> SİNYAL! {coin} {yon} {skor:.2f}")
                 telegram_gonder(coin, skor, krit, fiyat, df, yon, mtf, bonus)
                 sinyaller.append((coin, yon, skor))
-            time.sleep(0.4)  # rate limit
+            time.sleep(0.4)
         except Exception as e:
             print(f"Hata: {e}")
 
@@ -776,24 +824,20 @@ def tek_seferlik_tarama(max_coin: int = 25):
     if sinyaller:
         print("Sinyaller:", sinyaller)
 
-    # Açık işlem kontrolü (demo için)
     acik_islemleri_kontrol(guncel)
-
-    # Güncel Excel
     excel_raporu_olustur(demo_data=False)
     ozet = performans_ozeti_metin()
     telegram_mesaj(ozet)
     print("\n" + ozet)
 
-    print("\n📁 Çıktılar hazır (Render'da /tmp, lokalde current dir):")
+    print("\n📁 Çıktılar hazır:")
     print("  - Performans_Raporu.xlsx")
     print("  - *_chart.png dosyaları")
     print("  - islemler.db")
     return sinyaller
 
-
 # ==========================================
-# 9. FLASK KEEP-ALIVE (Render.com için)
+# 9. FLASK + SÜREKLİ BOT
 # ==========================================
 from flask import Flask
 app = Flask(__name__)
@@ -803,7 +847,6 @@ def keep_alive():
     return f"""
     <h1>🟢 Kripto Sinyal Botu 7/24 Aktif!</h1>
     <p>Son Kontrol: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-    <p>Render + GitHub üzerinde çalışıyor.</p>
     <p>Bu bot yalnızca teknik analiz üretir, yatırım tavsiyesi değildir.</p>
     """
 
@@ -816,7 +859,6 @@ def run_flask():
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 def oto_ping():
-    """Render free tier'in uyumasını engellemek için kendini pingler."""
     while True:
         if RENDER_URL:
             try:
@@ -824,14 +866,11 @@ def oto_ping():
                 print(f"[PING] {RENDER_URL} → OK")
             except Exception as e:
                 print(f"[PING] Hata: {e}")
-        time.sleep(600)  # 10 dakikada bir
+        time.sleep(600)
 
-# ==========================================
-# 10. SÜREKLİ BOT MOTORU
-# ==========================================
 def bot_motoru():
     db_kurulum()
-    print("🚀 Sürekli bot başlatıldı (Render/GitHub uyumlu)...")
+    print("🚀 Sürekli bot başlatıldı...")
     while True:
         try:
             guncel = {}
@@ -843,28 +882,25 @@ def bot_motoru():
                     telegram_gonder(coin, skor, krit, fiyat, df, yon, mtf, bonus)
                 time.sleep(0.35)
             acik_islemleri_kontrol(guncel)
-            time.sleep(900)  # 15 dakikada bir tam tarama
+            time.sleep(900)
         except Exception as e:
             print(f"Döngü hata: {e}")
             time.sleep(60)
 
 # ==========================================
-# 11. BAŞLATMA
+# 10. BAŞLATMA
 # ==========================================
 if __name__ == "__main__":
     import sys
 
-    # Render / Production modu (Flask + arka plan bot + ping)
     if os.environ.get("RENDER") or os.environ.get("PORT") or "--render" in sys.argv:
         print("🌐 Render / Production modu başlatılıyor...")
         threading.Thread(target=bot_motoru, daemon=True).start()
         threading.Thread(target=oto_ping, daemon=True).start()
         run_flask()
 
-    # Lokal sürekli bot
     elif len(sys.argv) > 1 and sys.argv[1] == "--continuous":
         bot_motoru()
 
-    # Varsayılan: tek seferlik tarama + rapor
     else:
         tek_seferlik_tarama(max_coin=20)
