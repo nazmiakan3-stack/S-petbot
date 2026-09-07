@@ -248,9 +248,10 @@ def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float) -> str:
                 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'
             }, inplace=True)
 
-            ma50 = ta.sma(df_plot['Close'], 50)
-            ma100 = ta.sma(df_plot['Close'], 100)
-            ma200 = ta.sma(df_plot['Close'], 200)
+            # Pandas Native Rolling (make_addplot tip hatalarını önlemek için)
+            ma50 = df_plot['Close'].rolling(window=50).mean()
+            ma100 = df_plot['Close'].rolling(window=100).mean()
+            ma200 = df_plot['Close'].rolling(window=200).mean()
 
             mc = mpf.make_marketcolors(
                 up='#26a69a', down='#ef5350',
@@ -390,7 +391,6 @@ def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus
     stop = fiyat - (atr * 1.5) if yon == "LONG" else fiyat + (atr * 1.5)
     hedef = (fiyat + (fiyat-stop)*1.5) if yon=='LONG' else (fiyat - (stop-fiyat)*1.5)
 
-    # Detaylı metin bloğu (Artık ayrı bir mesaj olarak gönderilecek)
     mesaj = f"🧠 <b>{symbol.replace('-', '/')} – {yon}</b>\n"
     mesaj += f"⭐ Skor: {skor:.2f}/20\n"
     mesaj += f"⏱ MTF bonus: +{mtf_bonus:.2f}/2\n\n"
@@ -410,12 +410,9 @@ def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus
     mesaj += "⚠️ Bu bot yalnızca teknik/algoritmik analiz üretir; garanti edilmiş fiyat hareketi ifade etmez."
 
     try:
-        # 1. Önce grafiği ve kısa başlığı gönder
         foto = grafik_ciz(df, symbol, yon, skor)
         kisa_baslik = f"🧠 <b>{symbol.replace('-', '/')} – {yon}</b> | Skor: {skor:.2f}/20"
         telegram_foto(foto, kisa_baslik)
-        
-        # 2. Hemen ardından tüm detaylı kriter listesini metin olarak gönder
         telegram_mesaj(mesaj)
     except Exception as e:
         print(f"Gönderim hatası: {e}")
