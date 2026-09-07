@@ -63,12 +63,12 @@ MIN_SKOR = 15.0
 OKX_BASE = "https://www.okx.com"
 
 # ==========================================
-# GÜVENLİ MİN / MAX (boş dizi hatasını tamamen önler)
+# GÜVENLİ MİN / MAX (boş dizi + NaN + Inf koruması)
 # ==========================================
 def safe_max(series_or_array):
     try:
         arr = np.asarray(series_or_array, dtype=float)
-        arr = arr[\~np.isnan(arr)]
+        arr = arr[np.isfinite(arr)]
         if arr.size == 0:
             return np.nan
         return float(np.max(arr))
@@ -78,7 +78,7 @@ def safe_max(series_or_array):
 def safe_min(series_or_array):
     try:
         arr = np.asarray(series_or_array, dtype=float)
-        arr = arr[\~np.isnan(arr)]
+        arr = arr[np.isfinite(arr)]
         if arr.size == 0:
             return np.nan
         return float(np.min(arr))
@@ -120,14 +120,12 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
 
     df = df.copy()
     
-    # Göstergeler
     df["RSI"] = ta.rsi(df["close"], length=14)
     df["MA50"] = ta.sma(df["close"], length=50)
     df["MA100"] = ta.sma(df["close"], length=100)
     df["MA200"] = ta.sma(df["close"], length=200)
     df["ATR"] = ta.atr(df["high"], df["low"], df["close"], length=14)
 
-    # FVG
     df["FVG_up"] = (df["low"].shift(-1) > df["high"].shift(1)) & (df["close"] > df["open"])
     df["FVG_down"] = (df["high"].shift(-1) < df["low"].shift(1)) & (df["close"] < df["open"])
 
@@ -136,12 +134,10 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
     onceki = df.iloc[-2] if len(df) > 1 else son
     fiyat = float(son["close"])
 
-    # Güvenli recent high / low
     recent_slice = df.iloc[-10:-1] if len(df) >= 11 else df.iloc[:-1]
     recent_low = safe_min(recent_slice["low"])
     recent_high = safe_max(recent_slice["high"])
 
-    # Güvenli BOS hesaplama
     bos_slice = df["high"].iloc[-look:-1] if len(df) > look else df["high"].iloc[:-1]
     bos_high = safe_max(bos_slice)
     bos_low_slice = df["low"].iloc[-look:-1] if len(df) > look else df["low"].iloc[:-1]
@@ -309,7 +305,7 @@ def analiz_yap(symbol: str):
     return skor, kriterler, info["fiyat"], df_4h, yon, mtf_list, mtf_bonus
 
 # ==========================================
-# 5. GÜVENLİ GRAFİK OLUŞTURMA (Thread-Safe + Boş veri koruması)
+# 5. GÜVENLİ GRAFİK OLUŞTURMA (Thread-Safe)
 # ==========================================
 def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float) -> str | None:
     with matplotlib_lock:
@@ -318,7 +314,6 @@ def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float) -> str | No
                 print(f"Grafik için yetersiz veri: {symbol} (len={len(df) if df is not None else 0})")
                 return None
 
-            # Son 100 mumu al, yeterli yoksa mevcut olanı kullan
             df_plot = df.tail(min(100, len(df))).copy()
             
             if len(df_plot) < 20:
@@ -330,12 +325,10 @@ def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float) -> str | No
                 'close': 'Close', 'volume': 'Volume'
             })
 
-            # Rolling MA'lar (NaN'ları güvenli şekilde yönet)
             ma50 = df_plot['Close'].rolling(window=50, min_periods=10).mean()
             ma100 = df_plot['Close'].rolling(window=100, min_periods=20).mean()
             ma200 = df_plot['Close'].rolling(window=200, min_periods=30).mean()
 
-            # Sadece yeterli veri olan MA'ları ekle
             addplots = []
             if ma50.notna().sum() > 10:
                 addplots.append(mpf.make_addplot(ma50, color='#42a5f5', width=1.2))
@@ -519,9 +512,6 @@ def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus
         
         if foto:
             telegram_foto(foto, kisa_baslik)
-            # Geçici dosyayı silmek istersen:
-            # try: os.remove(foto)
-            # except: pass
         else:
             print(f"Grafik oluşturulamadı, sadece metin gönderiliyor: {symbol}")
         
