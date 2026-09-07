@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gelişmiş Kripto Sinyal Botu - Tam Sürüm (Excel Belge Gönderimli)
+Gelişmiş Kripto Sinyal Botu - Tam Sürüm (Excel & Siyah Dashboard Görselli)
 - SMC + İndikatör Skorlama
 - MTF Analizi & Bonuslar
 - Detaylı Grafik Üretimi
 - Açık İşlem Takibi & BE (Break Even) Yönetimi
 - Excel 2 Sekmeli Renkli Rapor (Telegram Belge Gönderimi Dahil)
+- Siyah Temalı Görsel Performans Dashboard Paneli (Plotly Dark UI)
 """
 
 import os
@@ -395,8 +396,80 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
         excel_raporu_olustur()
 
 # ==========================================
-# 6. EXCEL RAPOR OLUŞTURMA
+# 6. EXCEL RAPORU & SIYAH DASHBOARD
 # ==========================================
+def siyah_dashboard_olustur():
+    """Aylık kâr/zarar performansını siyah dashboard kartı (Dark UI Panel) olarak üretir."""
+    conn = sqlite3.connect(os.path.join(ARTIFACT_DIR, "islemler.db"))
+    df = pd.read_sql_query("SELECT * FROM islemler WHERE durum != 'ACIK'", conn)
+    conn.close()
+
+    if df.empty:
+        return None
+
+    # Tarih formatlama ve aylık gruplama
+    df['tarih_dt'] = pd.to_datetime(df['tarih'], errors='coerce')
+    df['ay'] = df['tarih_dt'].dt.strftime('%Y-%m')
+    
+    aylik = df.groupby('ay')['kâr_r'].sum().reset_index()
+    aylik = aylik.sort_values('ay', ascending=True)
+
+    toplam_r = df['kâr_r'].sum()
+    ort_r = aylik['kâr_r'].mean() if not aylik.empty else 0.0
+    en_yuksek_ay = aylik['kâr_r'].max() if not aylik.empty else 0.0
+    son_ay_r = aylik['kâr_r'].iloc[-1] if not aylik.empty else 0.0
+
+    toplam_pozitif_r = aylik[aylik['kâr_r'] > 0]['kâr_r'].sum()
+    aylik['katki_yuzde'] = aylik['kâr_r'].apply(
+        lambda x: f"{(x / toplam_pozitif_r * 100):.2f}%" if (toplam_pozitif_r > 0 and x > 0) else "0.00%"
+    )
+
+    aylar = aylik['ay'].tolist()
+    getiriler = [f"+{r:.2f} R" if r >= 0 else f"{r:.2f} R" for r in aylik['kâr_r']]
+    katkilar = aylik['katki_yuzde'].tolist()
+    durumlar = ["🟢 Başarılı" if r > 0 else ("🔴 Zarar" if r < 0 else "⚪ Nötr") for r in aylik['kâr_r']]
+
+    fig = go.Figure()
+
+    # Koyu Temalı Tablo Paneli
+    fig.add_trace(go.Table(
+        header=dict(
+            values=["<b>DÖNEM / AY</b>", "<b>AYLIK GETİRİ (R)</b>", "<b>KATKI PAYI (%)</b>", "<b>DURUM</b>"],
+            fill_color='#1f2937',
+            align='center',
+            font=dict(color='white', size=13, family="Arial")
+        ),
+        cells=dict(
+            values=[aylar, getiriler, katkilar, durumlar],
+            fill_color='#111827',
+            align='center',
+            font=dict(color=['#9ca3af', '#10b981', '#3b82f6', 'white'], size=12, family="Arial"),
+            height=30
+        )
+    ))
+
+    baslik_metni = (
+        f"<b>KRİPTO SİNYAL BOTU PERFORMANS ÖZETİ</b><br>"
+        f"<span style='font-size:12px; color:#9ca3af;'>Aylık Algoritmik Ticaret Raporu</span><br><br>"
+        f"<span style='color:#10b981;'><b>TOPLAM KAZANÇ:</b> +{toplam_r:.1f} R</span> &nbsp;&nbsp;|&nbsp;&nbsp; "
+        f"<b>ORTALAMA:</b> +{ort_r:.1f} R &nbsp;&nbsp;|&nbsp;&nbsp; "
+        f"<b>EN YÜKSEK AY:</b> +{en_yuksek_ay:.1f} R &nbsp;&nbsp;|&nbsp;&nbsp; "
+        f"<b>SON AY:</b> +{son_ay_r:.1f} R"
+    )
+
+    fig.update_layout(
+        title=dict(text=baslik_metni, x=0.5, y=0.92, xanchor='center', font=dict(size=15, color="white")),
+        paper_bgcolor="#0b0f19",
+        plot_bgcolor="#0b0f19",
+        width=800,
+        height=500,
+        margin=dict(l=20, r=20, t=110, b=20)
+    )
+
+    dosya_yolu = os.path.join(ARTIFACT_DIR, "dashboard_ozet.png")
+    fig.write_image(dosya_yolu, scale=2)
+    return dosya_yolu
+
 def excel_raporu_olustur(demo_data: bool = False):
     conn, _ = db_baglanti()
     df = pd.read_sql_query("SELECT * FROM islemler", conn)
@@ -552,11 +625,17 @@ def tek_seferlik_tarama(max_coin: int = 25):
 
     acik_islemleri_kontrol(guncel)
 
-    # Excel Raporu ve Telegram Gönderimi
+    # Excel Raporu ve Telegram Belge Gönderimi
     excel_dosyasi = excel_raporu_olustur(demo_data=False)
     ozet_metni = performans_ozeti_metin()
     
     telegram_mesaj(ozet_metni)
+
+    # Siyah Dashboard Paneli Üretimi & Telegram Foto Gönderimi
+    dashboard_img = siyah_dashboard_olustur()
+    if dashboard_img and os.path.exists(dashboard_img):
+        telegram_foto(dashboard_img, "📊 <b>Kripto Sinyal Botu - Görsel Performans Özeti</b>")
+
     if excel_dosyasi and os.path.exists(excel_dosyasi):
         telegram_belge_gonder(excel_dosyasi, "📊 Güncel Kripto Performans Raporu (Excel)")
 
