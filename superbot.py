@@ -369,16 +369,25 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
 
     for row in rows:
         islem_id, coin, yon, giris, hedef, stop, orj_stop, is_be = row
-        if coin not in guncel_fiyatlar: continue
+        if coin not in guncel_fiyatlar:
+            continue
         anlik = guncel_fiyatlar[coin]
         risk = abs(giris - (orj_stop or stop))
-        if risk <= 0: continue
+        if risk <= 0:
+            continue
         mevcut_r = (anlik - giris) / risk if yon == "LONG" else (giris - anlik) / risk
 
+        # +1R olunca stop'u girişe çek (Break-Even)
         if mevcut_r >= 1.0 and is_be == 0:
             c.execute("UPDATE islemler SET stop_loss=?, is_be=1 WHERE id=?", (giris, islem_id))
-            telegram_mesaj(f"🛡 <b>STOPU GİRİŞE ÇEK (BE)</b>\n\n📌 <b>{coin} ({yon})</b>\n📈 İşlem +1R kâra geçti!\n🎯 Stop fiyatı: {giris}")
+            telegram_mesaj(
+                f"🛡 <b>STOPU GİRİŞE ÇEK (BE)</b>\n\n"
+                f"📌 <b>{coin} ({yon})</b>\n"
+                f"📈 İşlem +1R kâra geçti!\n"
+                f"🎯 Borsa stop seviyesini giriş fiyatına ({giris}) çek."
+            )
             is_be = 1
+            stop = giris  # Yerel stop değişkenini de güncelle ki sonraki kontrol doğru olsun
             guncelleme = True
 
         if yon == "LONG":
@@ -388,18 +397,22 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
                 guncelleme = True
             elif anlik <= stop:
                 durum, r_val = ('BE', 0.0) if is_be else ('LOSS', -1.0)
-                telegram_mesaj(f"{'🛡' if is_be else '❌'} <b>{coin} (LONG)</b>\n{'Başabaş Kapanış' if is_be else 'Stop Oldu'} ({r_val:+.2f}R)")
+                emoji = '🛡' if is_be else '❌'
+                mesaj_durum = 'Başabaş Kapanış' if is_be else 'Stop Oldu'
+                telegram_mesaj(f"{emoji} <b>{coin} (LONG)</b>\n{mesaj_durum} ({r_val:+.2f}R)")
                 c.execute("UPDATE islemler SET durum=?, kâr_r=? WHERE id=?", (durum, r_val, islem_id))
                 guncelleme = True
-        else:
+        else:  # SHORT
             if anlik <= hedef:
                 telegram_mesaj(f"✅ <b>{coin} (SHORT)</b>\n💰 Hedefe Ulaştı! (+1.50R)")
                 c.execute("UPDATE islemler SET durum='WIN', kâr_r=1.5 WHERE id=?", (islem_id,))
                 guncelleme = True
             elif anlik >= stop:
                 durum, r_val = ('BE', 0.0) if is_be else ('LOSS', -1.0)
-                telegram_mesaj(f"{'🛡' if is_be else '❌'} <b>{coin} (SHORT)</b>\n{'Başabaş Kapanış' if is_be else 'Stop Oldu'} ({r_val:+.2f}R)")
-                c.execute("UPDATE islemler SET durum=?, kâr_r=? WHERE id=?", (islem_id,))
+                emoji = '🛡' if is_be else '❌'
+                mesaj_durum = 'Başabaş Kapanış' if is_be else 'Stop Oldu'
+                telegram_mesaj(f"{emoji} <b>{coin} (SHORT)</b>\n{mesaj_durum} ({r_val:+.2f}R)")
+                c.execute("UPDATE islemler SET durum=?, kâr_r=? WHERE id=?", (durum, r_val, islem_id))
                 guncelleme = True
 
     conn.commit()
@@ -496,9 +509,17 @@ def excel_raporu_olustur():
     ozet["Ort. R / İşlem"] = ozet.apply(lambda r: round(r["Toplam_R"] / r["Toplam_Islem"], 3) if r["Toplam_Islem"] > 0 else 0, axis=1)
 
     def degerlendirme(r):
-        if r["Toplam_Islem"] >= 5 and r["Ort. R / İşlem"] < -0.2: return "ELE - Kötü performans"
-        if r["Ort. R / İşlem"] < 0: return "Riskli - Takip et"
-        if r["Ort. R / İşlem"] >= 0.5: return "Güçlü - Tut"
+        ort = r["Ort. R / İşlem"]
+        n = r["Toplam_Islem"]
+        # Ekran görüntüsündeki mantığa daha yakın
+        if n >= 5 and ort < -0.2:
+            return "ELE - kötü performans"
+        if ort < 0 or n < 5:
+            return "Riskli - takip et" if n >= 5 else "Riskli - az örneklem"
+        if ort >= 0.5 and n >= 5:
+            return "Güçlü - tut"
+        if ort >= 0.5 and n < 5:
+            return "Güçlü - tut (az örneklem)"
         return "Normal"
 
     ozet["Değerlendirme"] = ozet.apply(degerlendirme, axis=1)
@@ -508,9 +529,9 @@ def excel_raporu_olustur():
     header_font = Font(bold=True, color="FFFFFF")
     thin = Border(left=Side(style="thin"), right=Side(style="thin"), top=Side(style="thin"), bottom=Side(style="thin"))
     fills = {
-        "ELE": PatternFill("solid", fgColor="F5CBA7"),
-        "Riskli": PatternFill("solid", fgColor="F9E79F"),
-        "Güçlü": PatternFill("solid", fgColor="A9DFBF"),
+        "ELE": PatternFill("solid", fgColor="F5CBA7"),       # Turuncu
+        "Riskli": PatternFill("solid", fgColor="F9E79F"),    # Sarı
+        "Güçlü": PatternFill("solid", fgColor="A9DFBF"),     # Yeşil
         "Normal": PatternFill("solid", fgColor="FFFFFF"),
     }
 
@@ -535,7 +556,9 @@ def excel_raporu_olustur():
     toplam_islem = int(ozet["Toplam_Islem"].sum())
     toplam_win = int(ozet["WIN"].sum())
     toplam_loss = int(ozet["LOSS"].sum())
+    toplam_be = int(ozet["BE"].sum())
     genel_wr = f"{(toplam_win / (toplam_win + toplam_loss) * 100):.1f}%" if (toplam_win + toplam_loss) > 0 else "0.0%"
+    ele_sayisi = int(ozet["Değerlendirme"].str.contains("ELE").sum())
 
     ozet_veriler = [
         ("Sinyal Botu Performans Özeti", ""),
@@ -543,16 +566,30 @@ def excel_raporu_olustur():
         ("Toplam Coin Sayısı", len(ozet)),
         ("Toplam WIN", toplam_win),
         ("Toplam LOSS", toplam_loss),
+        ("Toplam BE", toplam_be),
         ("Genel Win Rate", genel_wr),
-        ("Toplam R (Kümülatif)", round(ozet["Toplam_R"].sum(), 2)),
+        ("Toplam R (kümülatif)", round(ozet["Toplam_R"].sum(), 2)),
+        ("ELE önerilen coin sayısı (az örneklem hariç)", ele_sayisi),
     ]
 
     for r_idx, (k, v) in enumerate(ozet_veriler, 1):
         ws2.cell(row=r_idx, column=1, value=k).font = Font(bold=True) if r_idx > 1 else Font(bold=True, size=14)
         ws2.cell(row=r_idx, column=2, value=v)
 
-    ws2.column_dimensions["A"].width = 30
-    ws2.column_dimensions["B"].width = 15
+    # Renk kodu açıklaması
+    ws2.cell(row=len(ozet_veriler) + 2, column=1, value="Renk Kodu Açıklaması").font = Font(bold=True, size=12)
+    aciklamalar = [
+        ("ELE - kötü performans", "min 5 işlem, ortalama R < -0.2 (net zarar ettiriyor)"),
+        ("Riskli / az örneklem (sarı)", "ortalama R negatif; ya da <5 işlem ile belirsiz sonuç"),
+        ("Güçlü - tut", "ortalama R >= 0.5, yeterli örneklem (>=5 işlem)"),
+        ("Güçlü ama az örneklem (açık yeşil)", "ortalama R >= 0.5 ama <5 işlem — umut verici, daha fazla veri topla"),
+    ]
+    for i, (baslik, aciklama) in enumerate(aciklamalar, start=len(ozet_veriler) + 3):
+        ws2.cell(row=i, column=1, value=baslik)
+        ws2.cell(row=i, column=2, value=aciklama)
+
+    ws2.column_dimensions["A"].width = 45
+    ws2.column_dimensions["B"].width = 55
     wb.save(dosya)
     return dosya
 
@@ -567,16 +604,20 @@ def performans_ozeti_metin() -> str:
 
 def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus):
     mesaj = f"🧠 <b>{symbol} – {yon}</b>\n⭐ Skor: {skor:.2f}/20\n⏱ MTF bonus: +{mtf_bonus:.2f}/2\n\n<b>4H kriterleri:</b>\n"
-    for k in kriterler: mesaj += f"• {k}\n"
+    for k in kriterler:
+        mesaj += f"• {k}\n"
     mesaj += "\n<b>Zaman dilimleri:</b>\n"
-    for m in mtf_list: mesaj += f"{m}\n"
+    for m in mtf_list:
+        mesaj += f"{m}\n"
 
     atr = ta.atr(df["high"], df["low"], df["close"], 14).iloc[-1]
-    if pd.isna(atr) or atr <= 0: atr = fiyat * 0.02
+    if pd.isna(atr) or atr <= 0:
+        atr = fiyat * 0.02
     stop = fiyat - (atr * 1.5) if yon == "LONG" else fiyat + (atr * 1.5)
-    hedef = (fiyat + (fiyat-stop)*1.5) if yon=='LONG' else (fiyat - (stop-fiyat)*1.5)
+    hedef = (fiyat + (fiyat - stop) * 1.5) if yon == "LONG" else (fiyat - (stop - fiyat) * 1.5)
 
     mesaj += f"\n💰 Giriş: {fiyat:.6f}\n🛡️ Stop: {stop:.6f}\n🎯 Hedef (1.5R): {hedef:.6f}"
+    mesaj += "\n\n⚠️ Bu bot yalnızca teknik/algoritmik analiz üretir; garanti edilmiş fiyat hareketi veya yatırım tavsiyesi değildir."
 
     try:
         foto = grafik_ciz(df, symbol, yon, skor)
