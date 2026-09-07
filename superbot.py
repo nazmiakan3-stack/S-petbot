@@ -10,8 +10,13 @@ from datetime import datetime
 import requests
 import pandas as pd
 import pandas_ta as ta
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+
+# Sunucu ortamında grafik çizerken ekran gereksinimini kaldırır
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import mplfinance as mpf
+
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
@@ -234,33 +239,45 @@ def analiz_yap(symbol: str):
     return skor, kriterler, info["fiyat"], df_4h, yon, mtf_list, mtf_bonus
 
 # ==========================================
-# 5. GRAFİK OLUŞTURMA
+# 5. GRAFİK OLUŞTURMA (mplfinance - Native Python)
 # ==========================================
 def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float) -> str:
-    df_plot = df.tail(120).copy()
-    df_plot["MA50"] = ta.sma(df_plot["close"], 50)
-    df_plot["MA100"] = ta.sma(df_plot["close"], 100)
-    df_plot["MA200"] = ta.sma(df_plot["close"], 200)
+    df_plot = df.tail(100).copy()
+    
+    # mplfinance sütun isimlerini büyük harf bekler
+    df_plot.rename(columns={
+        'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'
+    }, inplace=True)
 
-    fig = make_subplots(rows=1, cols=1)
-    fig.add_trace(go.Candlestick(
-        x=df_plot.index, open=df_plot["open"], high=df_plot["high"],
-        low=df_plot["low"], close=df_plot["close"], name="Fiyat",
-        increasing_line_color="#26a69a", decreasing_line_color="#ef5350"
-    ))
-    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["MA50"], line=dict(color="#42a5f5", width=1.5), name="MA50"))
-    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["MA100"], line=dict(color="#ffa726", width=1.5), name="MA100"))
-    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["MA200"], line=dict(color="#66bb6a", width=2), name="MA200"))
+    # Hareketli ortalamalar
+    ma50 = ta.sma(df_plot['Close'], 50)
+    ma100 = ta.sma(df_plot['Close'], 100)
+    ma200 = ta.sma(df_plot['Close'], 200)
 
-    fig.update_layout(
-        title=f"{symbol} | {yon} | Skor {skor:.2f}/20 | 4H",
-        yaxis_title="Fiyat", xaxis_rangeslider_visible=False,
-        template="plotly_white", height=500, margin=dict(l=40, r=40, t=50, b=40)
+    mc = mpf.make_marketcolors(
+        up='#26a69a', down='#ef5350',
+        edge='inherit', wick='inherit', volume='in'
     )
+    s = mpf.make_mpf_style(base_mpf_style='nightclouds', marketcolors=mc, gridcolor='#2a2e39')
+
+    addplots = [
+        mpf.make_addplot(ma50, color='#42a5f5', width=1.2),
+        mpf.make_addplot(ma100, color='#ffa726', width=1.2),
+        mpf.make_addplot(ma200, color='#66bb6a', width=1.5),
+    ]
 
     dosya = os.path.join(ARTIFACT_DIR, f"{symbol.replace('-', '_')}_chart.png")
-    # engine="kaleido" eklenerek Render üzerinde çökme ihtimali azaltıldı.
-    fig.write_image(dosya, scale=2, engine="kaleido")
+    
+    mpf.plot(
+        df_plot,
+        type='candle',
+        style=s,
+        addplot=addplots,
+        title=f"\n{symbol} | {yon} | Skor: {skor:.2f}/20 | 4H",
+        savefig=dict(fname=dosya, dpi=150, bbox_inches='tight'),
+        volume=False,
+        figsize=(10, 6)
+    )
     return dosya
 
 # ==========================================
@@ -309,14 +326,17 @@ def telegram_foto(path: str, caption: str):
         return
     try:
         with open(path, "rb") as f:
-            response = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
-                                     files={"photo": f}, data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "HTML"}, timeout=30)
+            response = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+                files={"photo": f},
+                data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "HTML"},
+                timeout=30
+            )
             if response.status_code != 200:
-                print(f"Telegram Foto Gönderme Hatası: {response.text}")
-                raise Exception(response.text)
+                print(f"Telegram Foto Hata Yanıtı: {response.text}")
+                telegram_mesaj(caption)
     except Exception as e:
-        print(f"Grafik gönderilemedi, metin atılıyor... Hata: {e}")
-        # Fotoğraf gitmezse sadece metni gönder (Fallback)
+        print(f"Grafik gönderme hatası: {e}")
         telegram_mesaj(caption)
 
 def acik_islemleri_kontrol(guncel_fiyatlar: dict):
@@ -358,17 +378,14 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
     conn.close()
 
 # ==========================================
-# 7. EXCEL & SIYAH DASHBOARD RAPORLARI
+# 7. RAPOR & MESAJ GÖNDERİMİ
 # ==========================================
-# ... (siyah_dashboard_olustur ve excel_raporu_olustur fonksiyonları aynı) ...
-
 def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus):
     atr = ta.atr(df["high"], df["low"], df["close"], 14).iloc[-1]
     if pd.isna(atr) or atr <= 0: atr = fiyat * 0.02
     stop = fiyat - (atr * 1.5) if yon == "LONG" else fiyat + (atr * 1.5)
     hedef = (fiyat + (fiyat-stop)*1.5) if yon=='LONG' else (fiyat - (stop-fiyat)*1.5)
 
-    # GÖRSELLERDEKİ EXACT ŞABLON:
     mesaj = f"🧠 <b>{symbol.replace('-', '/')} – {yon}</b>\n"
     mesaj += f"⭐ Skor: {skor:.2f}/20\n"
     mesaj += f"⏱ MTF bonus: +{mtf_bonus:.2f}/2\n\n"
@@ -391,8 +408,8 @@ def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus
         foto = grafik_ciz(df, symbol, yon, skor)
         telegram_foto(foto, mesaj)
     except Exception as e:
-        print(f"Grafik oluşturma/gönderme hatası: {e}")
-        telegram_mesaj(mesaj) # Grafik çökerse en azından mesajı atsın
+        print(f"Grafik hatası: {e}")
+        telegram_mesaj(mesaj)
 
     islem_kaydet(symbol, yon, fiyat, stop)
 
@@ -415,7 +432,7 @@ def tek_seferlik_tarama():
             print(f"Hata ({coin}): {e}")
 
     acik_islemleri_kontrol(guncel)
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Tarama ve raporlama tamamlandı.")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Tarama tamamlandı.")
 
 if __name__ == "__main__":
     if RUN_ONCE:
