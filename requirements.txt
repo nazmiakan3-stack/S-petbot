@@ -1,9 +1,10 @@
 flask
+gunicorn
 ccxt
 pandas
 pandas-ta
 plotly
-kaleido
+kaleido==0.2.1
 openpyxl
 smartmoneyconcepts
 requests
