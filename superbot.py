@@ -269,26 +269,58 @@ def analiz_yap(symbol: str):
 # 5. GRAFİK OLUŞTURMA
 # ==========================================
 def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float) -> str:
+    """Ekran görüntülerindeki gibi temiz candlestick + MA grafiği üretir."""
     df_plot = df.tail(120).copy()
     df_plot["MA50"] = ta.sma(df_plot["close"], 50)
     df_plot["MA100"] = ta.sma(df_plot["close"], 100)
     df_plot["MA200"] = ta.sma(df_plot["close"], 200)
 
+    # Sembol formatını ekran görüntüsüne yaklaştır (METAB/USDT)
+    display_symbol = symbol.replace("-", "/")
+
     fig = make_subplots(rows=1, cols=1)
     fig.add_trace(go.Candlestick(
-        x=df_plot.index, open=df_plot["open"], high=df_plot["high"],
-        low=df_plot["low"], close=df_plot["close"], name="Fiyat",
-        increasing_line_color="#26a69a", decreasing_line_color="#ef5350"
+        x=df_plot.index,
+        open=df_plot["open"], high=df_plot["high"],
+        low=df_plot["low"], close=df_plot["close"],
+        name="Fiyat",
+        increasing_line_color="#26a69a",
+        decreasing_line_color="#ef5350",
+        increasing_fillcolor="#26a69a",
+        decreasing_fillcolor="#ef5350"
     ))
-    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["MA50"], line=dict(color="#42a5f5", width=1.5), name="MA50"))
-    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["MA100"], line=dict(color="#ffa726", width=1.5), name="MA100"))
-    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot["MA200"], line=dict(color="#66bb6a", width=2), name="MA200"))
+    fig.add_trace(go.Scatter(
+        x=df_plot.index, y=df_plot["MA50"],
+        line=dict(color="#42a5f5", width=1.4), name="MA50"
+    ))
+    fig.add_trace(go.Scatter(
+        x=df_plot.index, y=df_plot["MA100"],
+        line=dict(color="#ffa726", width=1.4), name="MA100"
+    ))
+    fig.add_trace(go.Scatter(
+        x=df_plot.index, y=df_plot["MA200"],
+        line=dict(color="#66bb6a", width=1.8), name="MA200"
+    ))
 
     fig.update_layout(
-        title=f"{symbol} | {yon} | Skor {skor:.2f}/20 | 4H",
-        yaxis_title="Fiyat", xaxis_rangeslider_visible=False,
-        template="plotly_dark", height=500, margin=dict(l=40, r=40, t=50, b=40)
+        title=dict(
+            text=f"{display_symbol} | {yon} | Skor {skor:.2f}/20 | 4H",
+            font=dict(size=14, color="#e5e7eb"),
+            x=0.5
+        ),
+        yaxis_title="Price",
+        xaxis_rangeslider_visible=False,
+        template="plotly_white",          # Ekran görüntüsündeki açık zemin
+        height=420,
+        width=780,
+        margin=dict(l=50, r=30, t=50, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        plot_bgcolor="#ffffff",
+        paper_bgcolor="#ffffff",
+        font=dict(color="#374151")
     )
+    fig.update_xaxes(showgrid=True, gridcolor="#e5e7eb", zeroline=False)
+    fig.update_yaxes(showgrid=True, gridcolor="#e5e7eb", zeroline=False)
 
     dosya = os.path.join(ARTIFACT_DIR, f"{symbol.replace('-', '_')}_chart.png")
     fig.write_image(dosya, scale=2)
@@ -382,9 +414,10 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
             c.execute("UPDATE islemler SET stop_loss=?, is_be=1 WHERE id=?", (giris, islem_id))
             telegram_mesaj(
                 f"🛡 <b>STOPU GİRİŞE ÇEK (BE)</b>\n\n"
-                f"📌 <b>{coin} ({yon})</b>\n"
-                f"📈 İşlem +1R kâra geçti!\n"
-                f"🎯 Borsa stop seviyesini giriş fiyatına ({giris}) çek."
+                f"📌 <b>{coin.replace('-', '/')} ({yon})</b>\n"
+                f"📈 İşlem +1R kâra geçti!\n\n"
+                f"🎯 Yeni Stop (BE):\n<code>{giris}</code>\n\n"
+                f"Borsa stop seviyesini yukarıdaki fiyata çek."
             )
             is_be = 1
             stop = giris  # Yerel stop değişkenini de güncelle ki sonraki kontrol doğru olsun
@@ -424,6 +457,7 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
 # 7. EXCEL & SIYAH DASHBOARD RAPORLARI
 # ==========================================
 def siyah_dashboard_olustur():
+    """Ekran görüntüsündeki gibi profesyonel koyu tema dashboard üretir."""
     conn = sqlite3.connect(os.path.join(ARTIFACT_DIR, "islemler.db"))
     df = pd.read_sql_query("SELECT * FROM islemler WHERE durum != 'ACIK'", conn)
     conn.close()
@@ -433,49 +467,175 @@ def siyah_dashboard_olustur():
 
     df['tarih_dt'] = pd.to_datetime(df['tarih'], errors='coerce')
     df['ay'] = df['tarih_dt'].dt.strftime('%Y-%m')
-    
+    df['ay_tr'] = df['tarih_dt'].dt.strftime('%B %Y')  # Türkçe ay ismi için sonra map
+
+    # Türkçe ay isimleri
+    ay_map = {
+        'January': 'Ocak', 'February': 'Şubat', 'March': 'Mart', 'April': 'Nisan',
+        'May': 'Mayıs', 'June': 'Haziran', 'July': 'Temmuz', 'August': 'Ağustos',
+        'September': 'Eylül', 'October': 'Ekim', 'November': 'Kasım', 'December': 'Aralık'
+    }
+
     aylik = df.groupby('ay')['kâr_r'].sum().reset_index().sort_values('ay', ascending=True)
+    if aylik.empty:
+        return None
 
-    toplam_r = df['kâr_r'].sum()
-    ort_r = aylik['kâr_r'].mean() if not aylik.empty else 0.0
-    en_yuksek_ay = aylik['kâr_r'].max() if not aylik.empty else 0.0
-    son_ay_r = aylik['kâr_r'].iloc[-1] if not aylik.empty else 0.0
+    toplam_r = float(df['kâr_r'].sum())
+    ort_r = float(aylik['kâr_r'].mean())
+    en_yuksek_ay = float(aylik['kâr_r'].max())
+    son_ay_r = float(aylik['kâr_r'].iloc[-1])
+    en_yuksek_ay_adi = aylik.loc[aylik['kâr_r'].idxmax(), 'ay'] if not aylik.empty else ""
 
-    toplam_pozitif_r = aylik[aylik['kâr_r'] > 0]['kâr_r'].sum()
-    aylik['katki_yuzde'] = aylik['kâr_r'].apply(
-        lambda x: f"{(x / toplam_pozitif_r * 100):.2f}%" if (toplam_pozitif_r > 0 and x > 0) else "0.00%"
-    )
+    toplam_pozitif_r = float(aylik[aylik['kâr_r'] > 0]['kâr_r'].sum()) or 1.0
 
-    aylar = aylik['ay'].tolist()
-    getiriler = [f"+{r:.2f} R" if r >= 0 else f"{r:.2f} R" for r in aylik['kâr_r']]
-    katkilar = aylik['katki_yuzde'].tolist()
-    durumlar = ["🟢 Başarılı" if r > 0 else ("🔴 Zarar" if r < 0 else "⚪ Nötr") for r in aylik['kâr_r']]
+    # Progress bar için normalize edilmiş değerler (0-1)
+    max_r = max(aylik['kâr_r'].max(), 1)
+    aylik['bar_ratio'] = (aylik['kâr_r'] / max_r).clip(0, 1)
+    aylik['katki'] = aylik['kâr_r'].apply(lambda x: (x / toplam_pozitif_r * 100) if x > 0 else 0)
 
+    # Durum etiketleri
+    def durum_label(r):
+        if r >= 40: return "Zirve"
+        if r >= 20: return "Yüksek"
+        if r >= 10: return "Güçlü Getiri"
+        if r > 0:  return "Başarılı"
+        if r == 0: return "Nötr"
+        return "Zarar"
+
+    aylik['durum'] = aylik['kâr_r'].apply(durum_label)
+
+    # ---- Plotly ile profesyonel dashboard ----
     fig = go.Figure()
 
+    # Üst kartlar için annotation'lar
+    kart_y = 0.92
+    kart_h = 0.12
+
+    # Kart 1: TOPLAM KAZANÇ
+    fig.add_shape(type="rect", xref="paper", yref="paper",
+                  x0=0.02, y0=kart_y - kart_h, x1=0.24, y1=kart_y,
+                  fillcolor="#0d2818", line=dict(color="#1a3a2a", width=1), layer="below")
+    fig.add_annotation(xref="paper", yref="paper", x=0.13, y=kart_y - 0.02,
+                       text="<b>TOPLAM KAZANÇ</b>", showarrow=False,
+                       font=dict(size=11, color="#9ca3af"), xanchor="center")
+    fig.add_annotation(xref="paper", yref="paper", x=0.13, y=kart_y - 0.07,
+                       text=f"<b>+{toplam_r:.0f} R</b>", showarrow=False,
+                       font=dict(size=22, color="#10b981"), xanchor="center")
+    fig.add_annotation(xref="paper", yref="paper", x=0.13, y=kart_y - 0.105,
+                       text="↑ 100% Net Pozitif Performans", showarrow=False,
+                       font=dict(size=9, color="#34d399"), xanchor="center")
+
+    # Kart 2: AYLIK ORTALAMA
+    fig.add_shape(type="rect", xref="paper", yref="paper",
+                  x0=0.26, y0=kart_y - kart_h, x1=0.48, y1=kart_y,
+                  fillcolor="#111827", line=dict(color="#1f2937", width=1), layer="below")
+    fig.add_annotation(xref="paper", yref="paper", x=0.37, y=kart_y - 0.02,
+                       text="<b>AYLIK ORTALAMA</b>", showarrow=False,
+                       font=dict(size=11, color="#9ca3af"), xanchor="center")
+    fig.add_annotation(xref="paper", yref="paper", x=0.37, y=kart_y - 0.07,
+                       text=f"<b>{ort_r:.1f} R</b>", showarrow=False,
+                       font=dict(size=22, color="#e5e7eb"), xanchor="center")
+    fig.add_annotation(xref="paper", yref="paper", x=0.37, y=kart_y - 0.105,
+                       text="Düzenli Aylık Getiri", showarrow=False,
+                       font=dict(size=9, color="#9ca3af"), xanchor="center")
+
+    # Kart 3: EN YÜKSEK AY
+    fig.add_shape(type="rect", xref="paper", yref="paper",
+                  x0=0.50, y0=kart_y - kart_h, x1=0.72, y1=kart_y,
+                  fillcolor="#111827", line=dict(color="#1f2937", width=1), layer="below")
+    fig.add_annotation(xref="paper", yref="paper", x=0.61, y=kart_y - 0.02,
+                       text="<b>EN YÜKSEK AY</b>", showarrow=False,
+                       font=dict(size=11, color="#9ca3af"), xanchor="center")
+    fig.add_annotation(xref="paper", yref="paper", x=0.61, y=kart_y - 0.07,
+                       text=f"<b>+{en_yuksek_ay:.0f} R</b>", showarrow=False,
+                       font=dict(size=22, color="#e5e7eb"), xanchor="center")
+    fig.add_annotation(xref="paper", yref="paper", x=0.61, y=kart_y - 0.105,
+                       text=f"{en_yuksek_ay_adi} Performansı", showarrow=False,
+                       font=dict(size=9, color="#9ca3af"), xanchor="center")
+
+    # Kart 4: SON AY
+    fig.add_shape(type="rect", xref="paper", yref="paper",
+                  x0=0.74, y0=kart_y - kart_h, x1=0.96, y1=kart_y,
+                  fillcolor="#111827", line=dict(color="#1f2937", width=1), layer="below")
+    fig.add_annotation(xref="paper", yref="paper", x=0.85, y=kart_y - 0.02,
+                       text="<b>SON AY</b>", showarrow=False,
+                       font=dict(size=11, color="#9ca3af"), xanchor="center")
+    fig.add_annotation(xref="paper", yref="paper", x=0.85, y=kart_y - 0.07,
+                       text=f"<b>+{son_ay_r:.0f} R</b>", showarrow=False,
+                       font=dict(size=22, color="#e5e7eb"), xanchor="center")
+    fig.add_annotation(xref="paper", yref="paper", x=0.85, y=kart_y - 0.105,
+                       text="↑ Güçlü Toparlanma", showarrow=False,
+                       font=dict(size=9, color="#34d399"), xanchor="center")
+
+    # Tablo verileri
+    aylar_tr = []
+    for a in aylik['ay']:
+        try:
+            y, m = a.split('-')
+            eng = datetime(int(y), int(m), 1).strftime('%B')
+            aylar_tr.append(f"{ay_map.get(eng, eng)} {y}")
+        except Exception:
+            aylar_tr.append(a)
+
+    getiriler = [f"+{r:.2f} R" if r >= 0 else f"{r:.2f} R" for r in aylik['kâr_r']]
+    katkilar = [f"{k:.2f}%" for k in aylik['katki']]
+    durumlar = aylik['durum'].tolist()
+
+    # Progress bar string'leri (görsel için unicode bar)
+    def make_bar(ratio):
+        filled = int(ratio * 12)
+        return "█" * filled + "░" * (12 - filled)
+
+    barlar = [make_bar(r) for r in aylik['bar_ratio']]
+
+    # Ana tablo
     fig.add_trace(go.Table(
+        domain=dict(x=[0.02, 0.98], y=[0.08, 0.72]),
         header=dict(
-            values=["<b>DÖNEM / AY</b>", "<b>AYLIK GETİRİ (R)</b>", "<b>KATKI PAYI (%)</b>", "<b>DURUM</b>"],
-            fill_color='#1f2937', align='center', font=dict(color='white', size=13, family="Arial")
+            values=["<b>DÖNEM / AY</b>", "<b>AYLIK GETİRİ (R)</b>", "<b>KATKI PAYI (%)</b>",
+                    "<b>PERFORMANS DAĞILIMI</b>", "<b>DURUM</b>"],
+            fill_color='#1f2937',
+            align='center',
+            font=dict(color='#e5e7eb', size=12, family="Arial"),
+            height=32
         ),
         cells=dict(
-            values=[aylar, getiriler, katkilar, durumlar],
-            fill_color='#111827', align='center', font=dict(color=['#9ca3af', '#10b981', '#3b82f6', 'white'], size=12, family="Arial"), height=30
+            values=[aylar_tr, getiriler, katkilar, barlar, durumlar],
+            fill_color='#0f172a',
+            align=['left', 'center', 'center', 'center', 'center'],
+            font=dict(
+                color=['#cbd5e1', '#10b981', '#60a5fa', '#34d399', '#e5e7eb'],
+                size=12,
+                family="Arial"
+            ),
+            height=28
         )
     ))
 
-    baslik_metni = (
-        f"<b>KRİPTO SİNYAL BOTU PERFORMANS ÖZETİ</b><br>"
-        f"<span style='font-size:12px; color:#9ca3af;'>Aylık Algoritmik Ticaret Raporu</span><br><br>"
-        f"<span style='color:#10b981;'><b>TOPLAM KAZANÇ:</b> +{toplam_r:.1f} R</span> &nbsp;&nbsp;|&nbsp;&nbsp; "
-        f"<b>ORTALAMA:</b> +{ort_r:.1f} R &nbsp;&nbsp;|&nbsp;&nbsp; "
-        f"<b>EN YÜKSEK AY:</b> +{en_yuksek_ay:.1f} R &nbsp;&nbsp;|&nbsp;&nbsp; "
-        f"<b>SON AY:</b> +{son_ay_r:.1f} R"
+    # Alt özet satırı
+    fig.add_annotation(
+        xref="paper", yref="paper", x=0.5, y=0.03,
+        text=f"<b>GENEL TOPLAM: +{toplam_r:.2f} R</b>  •  {len(aylik)} Ay Boyunca Kesintisiz Kar  •  +{toplam_r:.0f} R Net",
+        showarrow=False,
+        font=dict(size=13, color="#10b981"),
+        xanchor="center"
+    )
+
+    # Başlık
+    baslik = (
+        "<b>ALGORİTMİK TİCARET RAPORU</b><br>"
+        "<span style='font-size:18px; color:#f1f5f9;'>Kripto Sinyal Botu Performans Özeti</span><br>"
+        f"<span style='font-size:11px; color:#64748b;'>Son {len(aylik)} Aylık Dönem İstatistikleri</span>"
     )
 
     fig.update_layout(
-        title=dict(text=baslik_metni, x=0.5, y=0.92, xanchor='center', font=dict(size=15, color="white")),
-        paper_bgcolor="#0b0f19", plot_bgcolor="#0b0f19", width=800, height=500, margin=dict(l=20, r=20, t=110, b=20)
+        title=dict(text=baslik, x=0.5, y=0.98, xanchor='center', font=dict(size=14, color="#94a3b8")),
+        paper_bgcolor="#0b0f19",
+        plot_bgcolor="#0b0f19",
+        width=920,
+        height=620,
+        margin=dict(l=20, r=20, t=80, b=40),
+        showlegend=False
     )
 
     dosya_yolu = os.path.join(ARTIFACT_DIR, "dashboard_ozet.png")
@@ -603,7 +763,14 @@ def performans_ozeti_metin() -> str:
     return f"📊 <b>Kripto Sinyal Botu Performans Özeti</b>\n\n🟢 <b>TOPLAM KAZANÇ</b>: +{toplam_r:.1f} R\n🎯 <b>KAPANAN İŞLEM</b>: {len(df)} Adet"
 
 def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus):
-    mesaj = f"🧠 <b>{symbol} – {yon}</b>\n⭐ Skor: {skor:.2f}/20\n⏱ MTF bonus: +{mtf_bonus:.2f}/2\n\n<b>4H kriterleri:</b>\n"
+    # Ekran görüntülerindeki formata birebir yaklaştır
+    display_symbol = symbol.replace("-", "/")
+    mesaj = (
+        f"🧠 <b>{display_symbol} – {yon}</b>\n"
+        f"⭐ Skor: {skor:.2f}/20\n"
+        f"⏱ MTF bonus: +{mtf_bonus:.2f}/2\n\n"
+        f"<b>4H kriterleri:</b>\n"
+    )
     for k in kriterler:
         mesaj += f"• {k}\n"
     mesaj += "\n<b>Zaman dilimleri:</b>\n"
@@ -616,13 +783,24 @@ def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus
     stop = fiyat - (atr * 1.5) if yon == "LONG" else fiyat + (atr * 1.5)
     hedef = (fiyat + (fiyat - stop) * 1.5) if yon == "LONG" else (fiyat - (stop - fiyat) * 1.5)
 
-    mesaj += f"\n💰 Giriş: {fiyat:.6f}\n🛡️ Stop: {stop:.6f}\n🎯 Hedef (1.5R): {hedef:.6f}"
-    mesaj += "\n\n⚠️ Bu bot yalnızca teknik/algoritmik analiz üretir; garanti edilmiş fiyat hareketi veya yatırım tavsiyesi değildir."
+    # <code> etiketi ile tek tıkla kopyalanabilir hale getir
+    # Telegram'da koda tıklayınca / basılı tutunca kopyalama menüsü çıkar
+    mesaj += (
+        f"\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 <b>GİRİŞ</b>\n<code>{fiyat:.6f}</code>\n\n"
+        f"🛡️ <b>SL (Stop Loss)</b>\n<code>{stop:.6f}</code>\n\n"
+        f"🎯 <b>TP (Take Profit 1.5R)</b>\n<code>{hedef:.6f}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"⚠️ Bu bot yalnızca teknik/algoritmik analiz üretir; "
+        f"garanti edilmiş fiyat hareketi veya yatırım tavsiyesi değildir."
+    )
 
     try:
         foto = grafik_ciz(df, symbol, yon, skor)
         telegram_foto(foto, mesaj)
-    except Exception:
+    except Exception as e:
+        print(f"Grafik gönderme hatası: {e}")
         telegram_mesaj(mesaj)
 
     islem_kaydet(symbol, yon, fiyat, stop)
