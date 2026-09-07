@@ -11,16 +11,12 @@ import requests
 import pandas as pd
 import pandas_ta as ta
 
-# Sunucu ortamında grafik çizerken ekran gereksinimini kaldırır
+# Matplotlib GUI backend ayarı (Sunucu için zorunlu)
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import mplfinance as mpf
 
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils.dataframe import dataframe_to_rows
-from openpyxl.utils import get_column_letter
 from flask import Flask
 
 # ==========================================
@@ -33,7 +29,7 @@ def health_check():
     return "OK - Kripto Sinyal Botu Aktif ve Çalışıyor", 200
 
 def run_flask():
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
 # ==========================================
@@ -47,6 +43,9 @@ RUN_ONCE = os.environ.get("RUN_ONCE", "false").lower() in ["true", "1", "yes"]
 TARAMA_ARALIGI_DURMA_SANIYE = int(os.environ.get("TARAMA_ARALIGI_DURMA_SANIYE", "3600"))
 
 os.makedirs(ARTIFACT_DIR, exist_ok=True)
+
+# Matplotlib eşzamanlı çakışmalarını önlemek için kilit (Lock)
+matplotlib_lock = threading.Lock()
 
 HEDEF_COINLER = [
     'ONT-USDT', 'JUP-USDT', 'SNX-USDT', 'LDO-USDT', 'ZETA-USDT', 'AAVE-USDT', 'TIA-USDT', 'VET-USDT', 'DYDX-USDT', 'LTC-USDT',
@@ -239,46 +238,51 @@ def analiz_yap(symbol: str):
     return skor, kriterler, info["fiyat"], df_4h, yon, mtf_list, mtf_bonus
 
 # ==========================================
-# 5. GRAFİK OLUŞTURMA (mplfinance - Native Python)
+# 5. GÜVENLİ GRAFİK OLUŞTURMA (Thread-Safe)
 # ==========================================
 def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float) -> str:
-    df_plot = df.tail(100).copy()
-    
-    # mplfinance sütun isimlerini büyük harf bekler
-    df_plot.rename(columns={
-        'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'
-    }, inplace=True)
+    with matplotlib_lock:
+        try:
+            df_plot = df.tail(100).copy()
+            df_plot.rename(columns={
+                'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'
+            }, inplace=True)
 
-    # Hareketli ortalamalar
-    ma50 = ta.sma(df_plot['Close'], 50)
-    ma100 = ta.sma(df_plot['Close'], 100)
-    ma200 = ta.sma(df_plot['Close'], 200)
+            ma50 = ta.sma(df_plot['Close'], 50)
+            ma100 = ta.sma(df_plot['Close'], 100)
+            ma200 = ta.sma(df_plot['Close'], 200)
 
-    mc = mpf.make_marketcolors(
-        up='#26a69a', down='#ef5350',
-        edge='inherit', wick='inherit', volume='in'
-    )
-    s = mpf.make_mpf_style(base_mpf_style='nightclouds', marketcolors=mc, gridcolor='#2a2e39')
+            mc = mpf.make_marketcolors(
+                up='#26a69a', down='#ef5350',
+                edge='inherit', wick='inherit', volume='in'
+            )
+            s = mpf.make_mpf_style(base_mpf_style='nightclouds', marketcolors=mc, gridcolor='#2a2e39')
 
-    addplots = [
-        mpf.make_addplot(ma50, color='#42a5f5', width=1.2),
-        mpf.make_addplot(ma100, color='#ffa726', width=1.2),
-        mpf.make_addplot(ma200, color='#66bb6a', width=1.5),
-    ]
+            addplots = [
+                mpf.make_addplot(ma50, color='#42a5f5', width=1.2),
+                mpf.make_addplot(ma100, color='#ffa726', width=1.2),
+                mpf.make_addplot(ma200, color='#66bb6a', width=1.5),
+            ]
 
-    dosya = os.path.join(ARTIFACT_DIR, f"{symbol.replace('-', '_')}_chart.png")
-    
-    mpf.plot(
-        df_plot,
-        type='candle',
-        style=s,
-        addplot=addplots,
-        title=f"\n{symbol} | {yon} | Skor: {skor:.2f}/20 | 4H",
-        savefig=dict(fname=dosya, dpi=150, bbox_inches='tight'),
-        volume=False,
-        figsize=(10, 6)
-    )
-    return dosya
+            dosya = os.path.join(ARTIFACT_DIR, f"{symbol.replace('-', '_')}_chart.png")
+            
+            fig, axes = mpf.plot(
+                df_plot,
+                type='candle',
+                style=s,
+                addplot=addplots,
+                title=f"\n{symbol} | {yon} | Skor: {skor:.2f}/20 | 4H",
+                returnfig=True,
+                volume=False,
+                figsize=(10, 6)
+            )
+            fig.savefig(dosya, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            return dosya
+        except Exception as e:
+            plt.close('all')
+            print(f"Grafik çizim detay hatası ({symbol}): {e}")
+            raise e
 
 # ==========================================
 # 6. VERİTABANI & TELEGRAM BİLDİRİMLERİ
@@ -378,7 +382,7 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
     conn.close()
 
 # ==========================================
-# 7. RAPOR & MESAJ GÖNDERİMİ
+# 7. RAPOR & MESAJ GÖNDERİMİ (İKİ MESAJLI SİSTEM)
 # ==========================================
 def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus):
     atr = ta.atr(df["high"], df["low"], df["close"], 14).iloc[-1]
@@ -386,6 +390,7 @@ def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus
     stop = fiyat - (atr * 1.5) if yon == "LONG" else fiyat + (atr * 1.5)
     hedef = (fiyat + (fiyat-stop)*1.5) if yon=='LONG' else (fiyat - (stop-fiyat)*1.5)
 
+    # Detaylı metin bloğu (Artık ayrı bir mesaj olarak gönderilecek)
     mesaj = f"🧠 <b>{symbol.replace('-', '/')} – {yon}</b>\n"
     mesaj += f"⭐ Skor: {skor:.2f}/20\n"
     mesaj += f"⏱ MTF bonus: +{mtf_bonus:.2f}/2\n\n"
@@ -405,10 +410,15 @@ def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus
     mesaj += "⚠️ Bu bot yalnızca teknik/algoritmik analiz üretir; garanti edilmiş fiyat hareketi ifade etmez."
 
     try:
+        # 1. Önce grafiği ve kısa başlığı gönder
         foto = grafik_ciz(df, symbol, yon, skor)
-        telegram_foto(foto, mesaj)
+        kisa_baslik = f"🧠 <b>{symbol.replace('-', '/')} – {yon}</b> | Skor: {skor:.2f}/20"
+        telegram_foto(foto, kisa_baslik)
+        
+        # 2. Hemen ardından tüm detaylı kriter listesini metin olarak gönder
+        telegram_mesaj(mesaj)
     except Exception as e:
-        print(f"Grafik hatası: {e}")
+        print(f"Gönderim hatası: {e}")
         telegram_mesaj(mesaj)
 
     islem_kaydet(symbol, yon, fiyat, stop)
