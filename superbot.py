@@ -12,7 +12,6 @@ import pandas as pd
 import pandas_ta as ta
 import numpy as np
 
-# Matplotlib GUI backend ayarı (Sunucu için zorunlu)
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -34,7 +33,7 @@ def run_flask():
     app.run(host="0.0.0.0", port=port)
 
 # ==========================================
-# 2. AYARLAR & ORTAM DEĞİŞKENLERİ
+# 2. AYARLAR
 # ==========================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -43,11 +42,10 @@ ARTIFACT_DIR = os.environ.get("ARTIFACT_DIR", "./artifacts")
 RUN_ONCE = os.environ.get("RUN_ONCE", "false").lower() in ["true", "1", "yes"]
 TARAMA_ARALIGI_DURMA_SANIYE = int(os.environ.get("TARAMA_ARALIGI_DURMA_SANIYE", "3600"))
 
-# POZİSYON VE CÜZDAN AYARLARI
 ILK_BAKIYE = 500.0
 MARJIN_USD = 15.0
 KALDIRAC = 5
-POZISYON_USD = MARJIN_USD * KALDIRAC  # 75.0 USD Toplam Pozisyon Büyüklüğü
+POZISYON_USD = MARJIN_USD * KALDIRAC
 
 os.makedirs(ARTIFACT_DIR, exist_ok=True)
 matplotlib_lock = threading.Lock()
@@ -86,7 +84,7 @@ def safe_min(series_or_array):
         return np.nan
 
 # ==========================================
-# 3. VERİ ÇEKME (OKX API)
+# 3. VERİ ÇEKME
 # ==========================================
 def veri_cek(symbol: str, bar: str = "4H", limit: int = 250) -> pd.DataFrame | None:
     try:
@@ -98,7 +96,7 @@ def veri_cek(symbol: str, bar: str = "4H", limit: int = 250) -> pd.DataFrame | N
         data = r.json()
         if data.get("code") != "0" or not data.get("data"):
             return None
-        
+
         df = pd.DataFrame(data["data"], columns=["ts", "open", "high", "low", "close", "volume", "volCcy", "volCcyQuote", "confirm"])
         df = df.iloc[::-1].reset_index(drop=True)
         for col in ["open", "high", "low", "close", "volume"]:
@@ -112,7 +110,7 @@ def veri_cek(symbol: str, bar: str = "4H", limit: int = 250) -> pd.DataFrame | N
         return None
 
 # ==========================================
-# 4. TEKNİK & SMC ANALİZİ
+# 4. TEKNİK & SMC ANALİZİ (Gelişmiş)
 # ==========================================
 def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
     if df is None or len(df) < 60:
@@ -125,10 +123,61 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
     df["MA200"] = ta.sma(df["close"], length=200)
     df["ATR"] = ta.atr(df["high"], df["low"], df["close"], length=14)
 
+    # --- Swing High / Low ---
+    def find_swings(series, order=4):
+        highs, lows = [], []
+        for i in range(order, len(series) - order):
+            window = series.iloc[i - order:i + order + 1]
+            if series.iloc[i] >= window.max():
+                highs.append((series.index[i], float(series.iloc[i])))
+            if series.iloc[i] <= window.min():
+                lows.append((series.index[i], float(series.iloc[i])))
+        return highs, lows
+
+    swing_highs, _ = find_swings(df["high"], order=4)
+    _, swing_lows = find_swings(df["low"], order=4)
+
+    last_swing_high = swing_highs[-1][1] if swing_highs else safe_max(df["high"].iloc[-40:])
+    last_swing_low = swing_lows[-1][1] if swing_lows else safe_min(df["low"].iloc[-40:])
+
+    # --- FVG ---
     df["FVG_up"] = (df["low"].shift(-1) > df["high"].shift(1)) & (df["close"] > df["open"])
     df["FVG_down"] = (df["high"].shift(-1) < df["low"].shift(1)) & (df["close"] < df["open"])
 
-    look = 20
+    fvg_zones = []
+    for i in range(max(0, len(df) - 12), len(df) - 1):
+        if df["FVG_up"].iloc[i]:
+            fvg_zones.append({
+                "type": "bullish",
+                "top": float(df["low"].iloc[i + 1]),
+                "bottom": float(df["high"].iloc[i - 1]),
+            })
+        if df["FVG_down"].iloc[i]:
+            fvg_zones.append({
+                "type": "bearish",
+                "top": float(df["low"].iloc[i - 1]),
+                "bottom": float(df["high"].iloc[i + 1]),
+            })
+
+    # --- Order Block ---
+    ob_zones = []
+    atr_val = float(df["ATR"].iloc[-1]) if pd.notna(df["ATR"].iloc[-1]) else float(df["close"].iloc[-1]) * 0.02
+    for i in range(max(0, len(df) - 18), len(df) - 2):
+        body = abs(df["close"].iloc[i] - df["open"].iloc[i])
+        if body > atr_val * 0.85:
+            if df["close"].iloc[i] > df["open"].iloc[i]:
+                ob_zones.append({
+                    "type": "bullish",
+                    "top": float(df["high"].iloc[i]),
+                    "bottom": float(df["low"].iloc[i]),
+                })
+            else:
+                ob_zones.append({
+                    "type": "bearish",
+                    "top": float(df["high"].iloc[i]),
+                    "bottom": float(df["low"].iloc[i]),
+                })
+
     son = df.iloc[-1]
     onceki = df.iloc[-2] if len(df) > 1 else son
     fiyat = float(son["close"])
@@ -137,19 +186,55 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
     recent_low = safe_min(recent_slice["low"])
     recent_high = safe_max(recent_slice["high"])
 
-    bos_slice = df["high"].iloc[-look:-1] if len(df) > look else df["high"].iloc[:-1]
-    bos_high = safe_max(bos_slice)
-    bos_low_slice = df["low"].iloc[-look:-1] if len(df) > look else df["low"].iloc[:-1]
-    bos_low = safe_min(bos_low_slice)
+    look = 20
+    bos_high = safe_max(df["high"].iloc[-look:-1]) if len(df) > look else safe_max(df["high"].iloc[:-1])
+    bos_low = safe_min(df["low"].iloc[-look:-1]) if len(df) > look else safe_min(df["low"].iloc[:-1])
 
-    atr_val = float(son["ATR"]) if pd.notna(son["ATR"]) else fiyat * 0.02
+    # Equal High / Low
+    eq_look = min(20, len(df) - 1)
+    equal_high = equal_low = False
+    tol = atr_val * 0.25
+    highs = df["high"].iloc[-eq_look:]
+    lows = df["low"].iloc[-eq_look:]
+    for i in range(len(highs) - 1):
+        if abs(highs.iloc[i] - highs.iloc[-1]) < tol:
+            equal_high = True
+            break
+    for i in range(len(lows) - 1):
+        if abs(lows.iloc[i] - lows.iloc[-1]) < tol:
+            equal_low = True
+            break
+
+    # Fibonacci
+    fib_range = last_swing_high - last_swing_low if last_swing_high > last_swing_low else 0
+    fib_levels = {}
+    if fib_range > 0:
+        fib_levels = {
+            0.618: last_swing_high - fib_range * 0.618,
+            0.786: last_swing_high - fib_range * 0.786,
+            0.886: last_swing_high - fib_range * 0.886,
+        }
+
+    fib_zone = "Neutral"
+    fib_score_l = 0.75
+    fib_score_s = 0.75
+    if fib_levels:
+        near = any(abs(fiyat - lvl) < atr_val * 0.7 for lvl in fib_levels.values())
+        if near:
+            mid = (last_swing_high + last_swing_low) / 2
+            if fiyat < mid:
+                fib_zone = "Bullish"
+                fib_score_l, fib_score_s = 1.12, 0.50
+            else:
+                fib_zone = "Bearish"
+                fib_score_l, fib_score_s = 0.50, 1.12
 
     return {
         "fiyat": fiyat,
         "rsi": float(son["RSI"]) if pd.notna(son["RSI"]) else 50.0,
         "atr": atr_val,
-        "bullish_fvg": bool(df["FVG_up"].iloc[-5:].any()) if len(df) >= 5 else False,
-        "bearish_fvg": bool(df["FVG_down"].iloc[-5:].any()) if len(df) >= 5 else False,
+        "bullish_fvg": bool(df["FVG_up"].iloc[-5:].any()),
+        "bearish_fvg": bool(df["FVG_down"].iloc[-5:].any()),
         "above_ma200": fiyat > (float(son["MA200"]) if pd.notna(son["MA200"]) else 0),
         "above_ma100": fiyat > (float(son["MA100"]) if pd.notna(son["MA100"]) else 0),
         "above_ma50": fiyat > (float(son["MA50"]) if pd.notna(son["MA50"]) else 0),
@@ -159,6 +244,16 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
         "bearish_bos": (not np.isnan(bos_low)) and (son["close"] < bos_low),
         "bullish_ob": (onceki["close"] > onceki["open"]) and ((onceki["close"] - onceki["open"]) > atr_val * 0.8),
         "bearish_ob": (onceki["close"] < onceki["open"]) and ((onceki["open"] - onceki["close"]) > atr_val * 0.8),
+        "equal_high": equal_high,
+        "equal_low": equal_low,
+        "fib_zone": fib_zone,
+        "fib_score_l": fib_score_l,
+        "fib_score_s": fib_score_s,
+        "fib_levels": fib_levels,
+        "fvg_zones": fvg_zones[-4:],
+        "ob_zones": ob_zones[-4:],
+        "last_swing_high": last_swing_high,
+        "last_swing_low": last_swing_low,
     }
 
 def skor_hesapla(info: dict) -> tuple[float, list, str]:
@@ -212,18 +307,32 @@ def skor_hesapla(info: dict) -> tuple[float, list, str]:
         skor_s += 1.12
         krit_s.append("PO3: 1.12 - Bearish AMD/PO3 proxy")
 
-    skor_l += 0.75
-    krit_l.append("Fibonacci: 0.75 - Neutral Fib zone near 0.886")
-    skor_s += 0.75
-    krit_s.append("Fibonacci: 0.75 - Neutral Fib zone near 0.886")
+    # Fibonacci
+    fib_zone = info.get("fib_zone", "Neutral")
+    skor_l += info.get("fib_score_l", 0.75)
+    skor_s += info.get("fib_score_s", 0.75)
+    if fib_zone == "Bullish":
+        krit_l.append("Fibonacci: 1.12 - Bullish Fib zone near 0.618/0.786/0.886")
+        krit_s.append("Fibonacci: 0.50 - Neutral/Bearish Fib")
+    elif fib_zone == "Bearish":
+        krit_l.append("Fibonacci: 0.50 - Neutral/Bullish Fib")
+        krit_s.append("Fibonacci: 1.12 - Bearish Fib zone near 0.618/0.786/0.886")
+    else:
+        krit_l.append("Fibonacci: 0.75 - Neutral Fib zone near 0.886")
+        krit_s.append("Fibonacci: 0.75 - Neutral Fib zone near 0.886")
 
     rsi = info.get("rsi", 50)
-    if rsi > 50:
+    if rsi > 55:
         skor_l += 1.12
         krit_l.append(f"RSI: 1.12 - RSI {rsi:.1f} bullish")
-    else:
+    elif rsi < 45:
         skor_s += 1.12
         krit_s.append(f"RSI: 1.12 - RSI {rsi:.1f} bearish")
+    else:
+        skor_l += 0.39
+        skor_s += 0.39
+        krit_l.append(f"RSI: 0.39 - RSI {rsi:.1f} neutral")
+        krit_s.append(f"RSI: 0.39 - RSI {rsi:.1f} neutral")
 
     if info.get("above_ma200"):
         skor_l += 1.35
@@ -246,10 +355,12 @@ def skor_hesapla(info: dict) -> tuple[float, list, str]:
         skor_s += 0.90
         krit_s.append("MA 50: 0.90 - Price below MA50")
 
-    skor_l += 0.68
-    krit_l.append("Equal High: 0.68 - Equal highs detected")
-    skor_s += 0.68
-    krit_s.append("Equal Low: 0.68 - Equal lows detected")
+    if info.get("equal_high"):
+        skor_s += 0.68
+        krit_s.append("Equal High: 0.68 - Equal highs detected")
+    if info.get("equal_low"):
+        skor_l += 0.68
+        krit_l.append("Equal Low: 0.68 - Equal lows detected")
 
     return (skor_l, krit_l, "LONG") if skor_l >= skor_s else (skor_s, krit_s, "SHORT")
 
@@ -262,22 +373,25 @@ def mtf_analiz(symbol: str) -> tuple[list, float, float]:
         if df is None or len(df) < 50:
             mtf_list.append(f"• {label}: DATA YETERSIZ")
             continue
-        
+
         ma50 = ta.sma(df["close"], 50).iloc[-1]
         p = df["close"].iloc[-1]
-        
+
         if pd.isna(ma50):
             mtf_list.append(f"• {label}: DATA YETERSIZ")
             continue
-        
+
         t = 1 if p > ma50 else -1
         yon = "LONG" if t == 1 else "SHORT"
         skor_approx = 8.0 + (2.0 if t == 1 else 0)
         mtf_list.append(f"• {label}: {yon} ({skor_approx:.2f}/18)")
-        
-        if label == "1D": t1 = t
-        elif label == "4H": t4 = t
-        else: t1h = t
+
+        if label == "1D":
+            t1 = t
+        elif label == "4H":
+            t4 = t
+        else:
+            t1h = t
 
     bonus_l = 2.0 if (t1 == 1 and t4 == 1 and t1h == 1) else 0.0
     bonus_s = 2.0 if (t1 == -1 and t4 == -1 and t1h == -1) else 0.0
@@ -286,11 +400,11 @@ def mtf_analiz(symbol: str) -> tuple[list, float, float]:
 def analiz_yap(symbol: str):
     df_4h = veri_cek(symbol, "4H", 250)
     if df_4h is None or len(df_4h) < 60:
-        return 0.0, [], 0.0, None, "YOK", [], 0.0
+        return 0.0, [], 0.0, None, "YOK", [], 0.0, None
 
     info = basit_smc_ve_indikator(df_4h)
     if not info:
-        return 0.0, [], 0.0, None, "YOK", [], 0.0
+        return 0.0, [], 0.0, None, "YOK", [], 0.0, None
 
     skor, kriterler, yon = skor_hesapla(info)
     mtf_list, bonus_l, bonus_s = mtf_analiz(symbol)
@@ -298,18 +412,18 @@ def analiz_yap(symbol: str):
     mtf_bonus = bonus_l if yon == "LONG" else bonus_s
     skor += mtf_bonus
 
-    return skor, kriterler, info["fiyat"], df_4h, yon, mtf_list, mtf_bonus
+    return skor, kriterler, info["fiyat"], df_4h, yon, mtf_list, mtf_bonus, info
 
 # ==========================================
-# 5. GRAFİK OLUŞTURMA
+# 5. GRAFİK OLUŞTURMA (Gelişmiş)
 # ==========================================
-def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float) -> str | None:
+def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float, info: dict = None) -> str | None:
     with matplotlib_lock:
         try:
             if df is None or len(df) < 30:
                 return None
 
-            df_plot = df.tail(min(100, len(df))).copy()
+            df_plot = df.tail(min(120, len(df))).copy()
             if len(df_plot) < 20:
                 return None
 
@@ -330,31 +444,50 @@ def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float) -> str | No
             if ma200.notna().sum() > 10:
                 addplots.append(mpf.make_addplot(ma200, color='#66bb6a', width=1.5))
 
-            mc = mpf.make_marketcolors(
-                up='#26a69a', down='#ef5350',
-                edge='inherit', wick='inherit', volume='in'
-            )
+            hlines = {"hlines": [], "colors": [], "linestyle": "-.", "linewidths": 1.1}
+            if info and info.get("fib_levels"):
+                for price in info["fib_levels"].values():
+                    hlines["hlines"].append(price)
+                    hlines["colors"].append("#ce93d8")
+
+            mc = mpf.make_marketcolors(up='#26a69a', down='#ef5350', edge='inherit', wick='inherit', volume='in')
             s = mpf.make_mpf_style(
                 base_mpf_style='nightclouds',
                 marketcolors=mc,
-                gridcolor='#2a2e39'
+                gridcolor='#2a2e39',
+                facecolor='#131722',
+                edgecolor='#131722',
+                figcolor='#131722'
             )
 
             dosya = os.path.join(ARTIFACT_DIR, f"{symbol.replace('-', '_')}_chart.png")
-            
+
             fig, axes = mpf.plot(
                 df_plot,
                 type='candle',
                 style=s,
                 addplot=addplots if addplots else None,
+                hlines=hlines if hlines["hlines"] else None,
                 title=f"\n{symbol} | {yon} 5x Isolated | Skor: {skor:.2f}/20 | 4H",
                 returnfig=True,
-                volume=False,
-                figsize=(11, 6),
-                tight_layout=True
+                volume=True,
+                figsize=(13, 8),
+                tight_layout=True,
+                panel_ratios=(0.78, 0.22)
             )
-            
-            fig.savefig(dosya, dpi=140, bbox_inches='tight', facecolor='#131722')
+
+            ax = axes[0]
+
+            if info:
+                for z in info.get("fvg_zones", []):
+                    color = "#26a69a55" if z["type"] == "bullish" else "#ef535055"
+                    ax.axhspan(z["bottom"], z["top"], facecolor=color, edgecolor=None, zorder=0)
+
+                for z in info.get("ob_zones", []):
+                    color = "#42a5f570" if z["type"] == "bullish" else "#ef535070"
+                    ax.axhspan(z["bottom"], z["top"], facecolor=color, edgecolor="#ffffff30", linewidth=0.7, zorder=1)
+
+            fig.savefig(dosya, dpi=150, bbox_inches='tight', facecolor='#131722')
             plt.close(fig)
             return dosya
 
@@ -398,8 +531,9 @@ def db_kurulum():
 def bakiye_guncelle(pnl_usd: float):
     conn, c = db_baglanti()
     c.execute("SELECT bakiye FROM cuzdan ORDER BY id DESC LIMIT 1")
-    mevcut = c.fetchone()[0]
-    yeni_bakiye = mevcud + pnl_usd if 'mevcud' in locals() else mevcut + pnl_usd
+    row = c.fetchone()
+    mevcut = row[0] if row else ILK_BAKIYE
+    yeni_bakiye = mevcut + pnl_usd
     c.execute("UPDATE cuzdan SET bakiye=? WHERE id=(SELECT MAX(id) FROM cuzdan)", (yeni_bakiye,))
     conn.commit()
     conn.close()
@@ -465,7 +599,8 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
             continue
         anlik = guncel_fiyatlar[coin]
         risk = abs(giris - (orj_stop or stop))
-        if risk <= 0: continue
+        if risk <= 0:
+            continue
 
         mevcut_r = (anlik - giris) / risk if yon == "LONG" else (giris - anlik) / risk
 
@@ -474,10 +609,9 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
             telegram_mesaj(f"🛡 <b>STOPU GİRİŞE ÇEK (BE)</b>\n\n📌 <b>{coin} ({yon} 5x)</b>\n📈 +1R kâra ulaşıldı!\n🎯 Yeni Stop: {giris:.6f}")
             is_be = 1
 
-        # Kapanış Kontrolleri ve PnL (USD) Hesabı
         if yon == "LONG":
             if anlik >= hedef:
-                pnl_usd = (poz_usd * 0.03)  # Risk/ödül oranına göre ~1.5R kâr
+                pnl_usd = (poz_usd * 0.03)
                 yeni_b = bakiye_guncelle(pnl_usd)
                 telegram_mesaj(f"✅ <b>{coin} (LONG 5x)</b>\n💰 Hedef TP1 (+1.50R) Ulaşıldı!\n💵 Kâr: +${pnl_usd:.2f}\n🏦 Cüzdan: ${yeni_b:.2f}")
                 c.execute("UPDATE islemler SET durum='WIN', kâr_r=1.5, kâr_usd=? WHERE id=?", (pnl_usd, islem_id))
@@ -503,9 +637,6 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
     conn.commit()
     conn.close()
 
-# ==========================================
-# 7. SAATLİK PERFORMANS VE CÜZDAN RAPORU
-# ==========================================
 def saatlik_rapor_gonder(guncel_fiyatlar: dict):
     conn, c = db_baglanti()
     c.execute("SELECT bakiye FROM cuzdan ORDER BY id DESC LIMIT 1")
@@ -523,7 +654,7 @@ def saatlik_rapor_gonder(guncel_fiyatlar: dict):
         pnl = poz_usd * ((anlik - giris) / giris) if yon == "LONG" else poz_usd * ((giris - anlik) / giris)
         unrealized_pnl += pnl
         yuzde = ((anlik - giris) / giris * 100) if yon == "LONG" else ((giris - anlik) / giris * 100)
-        acik_detay += f"• <b>{coin}</b> ({yon} 5x): ${pnl:+.2f} (%{yuzde*5:+.2f})\n"
+        acik_detay += f"• <b>{coin}</b> ({yon} 5x): ${pnl:+.2f} (%{yuzde * 5:+.2f})\n"
 
     c.execute("SELECT COUNT(*), SUM(kâr_usd) FROM islemler WHERE durum!='ACIK'")
     kapanan_count, toplam_kapanan_pnl = c.fetchone()
@@ -542,10 +673,8 @@ def saatlik_rapor_gonder(guncel_fiyatlar: dict):
     rapor += f"💵 <b>Kullanılabilir Bakiye:</b> ${bakiye:.2f}\n"
     rapor += f"📈 <b>Açık Pozisyon PnL:</b> ${unrealized_pnl:+.2f}\n"
     rapor += f"💎 <b>Toplam Varlık:</b> ${toplam_varlik:.2f}\n\n"
-    
     rapor += f"🔓 <b>Açık Pozisyonlar ({len(acik_islemler)}):</b>\n"
     rapor += (acik_detay if acik_detay else "• Şu an açık pozisyon yok.\n") + "\n"
-        
     rapor += f"📜 <b>Kapanan İşlemler:</b> {kapanan_count} Adet\n"
     rapor += f"✅ Win: {win_count} | ❌ Loss: {loss_count}\n"
     rapor += f"💰 Realize Edilen PnL: ${toplam_kapanan_pnl:+.2f}\n"
@@ -554,23 +683,28 @@ def saatlik_rapor_gonder(guncel_fiyatlar: dict):
     telegram_mesaj(rapor)
     conn.close()
 
-def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus):
+def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus, info=None):
     atr = ta.atr(df["high"], df["low"], df["close"], 14).iloc[-1]
-    if pd.isna(atr) or atr <= 0: atr = fiyat * 0.02
-        
+    if pd.isna(atr) or atr <= 0:
+        atr = fiyat * 0.02
+
     stop = fiyat - (atr * 1.5) if yon == "LONG" else fiyat + (atr * 1.5)
     hedef = (fiyat + (fiyat - stop) * 1.5) if yon == 'LONG' else (fiyat - (stop - fiyat) * 1.5)
 
     mesaj = f"🧠 <b>{symbol.replace('-', '/')} – {yon} (5x Izole)</b>\n"
     mesaj += f"⭐ Skor: {skor:.2f}/20\n"
+    if mtf_bonus > 0:
+        mesaj += f"⏱ MTF bonus: +{mtf_bonus:.2f}/2\n"
     mesaj += f"💼 Marjin: ${MARJIN_USD} | Pozisyon: ${POZISYON_USD}\n\n"
-    
+
     mesaj += "<b>4H Kriterleri:</b>\n"
-    for k in kriterler: mesaj += f"• {k}\n"
-    
+    for k in kriterler:
+        mesaj += f"• {k}\n"
+
     mesaj += "\n<b>Zaman Dilimleri:</b>\n"
-    for m in mtf_list: mesaj += f"{m}\n"
-    
+    for m in mtf_list:
+        mesaj += f"{m}\n"
+
     mesaj += "\n────────────────────\n\n"
     mesaj += f"💰 <b>GİRİŞ:</b> {fiyat:.6f}\n"
     mesaj += f"🛡️ <b>SL:</b> {stop:.6f}\n"
@@ -578,7 +712,7 @@ def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus
     mesaj += "⚠️ Algoritmik sinyaldir, yatırım tavsiyesi değildir."
 
     try:
-        foto = grafik_ciz(df, symbol, yon, skor)
+        foto = grafik_ciz(df, symbol, yon, skor, info)
         kisa_baslik = f"🧠 <b>{symbol.replace('-', '/')} – {yon} 5x</b> | Skor: {skor:.2f}/20"
         if foto:
             telegram_foto(foto, kisa_baslik)
@@ -590,7 +724,7 @@ def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus
     islem_kaydet(symbol, yon, fiyat, stop)
 
 # ==========================================
-# 8. ÇALIŞTIRMA & DÖNGÜ YÖNETİMİ
+# 7. ÇALIŞTIRMA
 # ==========================================
 def tek_seferlik_tarama():
     print(f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 Tarama başlatılıyor...")
@@ -599,11 +733,11 @@ def tek_seferlik_tarama():
     guncel = {}
     for coin in HEDEF_COINLER:
         try:
-            skor, krit, fiyat, df, yon, mtf, bonus = analiz_yap(coin)
+            skor, krit, fiyat, df, yon, mtf, bonus, info = analiz_yap(coin)
             if fiyat:
                 guncel[coin] = fiyat
             if skor >= MIN_SKOR and df is not None and yon in ["LONG", "SHORT"]:
-                telegram_gonder(coin, skor, krit, fiyat, df, yon, mtf, bonus)
+                telegram_gonder(coin, skor, krit, fiyat, df, yon, mtf, bonus, info)
             time.sleep(0.25)
         except Exception as e:
             print(f"Hata ({coin}): {e}")
@@ -620,7 +754,7 @@ if __name__ == "__main__":
     else:
         threading.Thread(target=run_flask, daemon=True).start()
         print("🤖 Bot sürekli çalışma modunda (Flask Web Service) başlatıldı.")
-        
+
         while True:
             try:
                 tek_seferlik_tarama()
