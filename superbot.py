@@ -498,31 +498,66 @@ def grafik_ciz(df, symbol, yon, skor, info=None, giris=None, stop=None, hedef=No
             return None
 
 # ==========================================
-# 6. VERİTABANI + CÜZDAN
+# 6. VERİTABANI (ŞEMA GÜVENLİ)
 # ==========================================
 def db_baglanti():
     conn = sqlite3.connect(os.path.join(ARTIFACT_DIR, "islemler.db"), check_same_thread=False)
     return conn, conn.cursor()
 
 def db_kurulum():
+    """Eski şemayı tespit ederse tabloyu silip yeniden oluşturur."""
     conn, c = db_baglanti()
-    c.execute("""CREATE TABLE IF NOT EXISTS cuzdan (id INTEGER PRIMARY KEY, bakiye REAL DEFAULT 500.0)""")
+
+    # Cüzdan tablosu
+    c.execute("""CREATE TABLE IF NOT EXISTS cuzdan (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bakiye REAL DEFAULT 500.0
+    )""")
     c.execute("SELECT COUNT(*) FROM cuzdan")
     if c.fetchone()[0] == 0:
         c.execute("INSERT INTO cuzdan (bakiye) VALUES (?)", (ILK_BAKIYE,))
-    c.execute("""CREATE TABLE IF NOT EXISTS islemler (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        coin TEXT, yon TEXT, giris_fiyati REAL, hedef_r1 REAL, stop_loss REAL,
-        orjinal_stop REAL, marjin REAL, kaldirac INTEGER, pozisyon_usd REAL,
-        durum TEXT, kâr_r REAL, kâr_usd REAL, is_be INTEGER, tarih TEXT
-    )""")
+
+    # İşlemler tablosu - şema kontrolü
+    c.execute("PRAGMA table_info(islemler)")
+    kolonlar = [row[1] for row in c.fetchall()]
+
+    gerekli_kolonlar = [
+        "id", "coin", "yon", "giris_fiyati", "hedef_r1", "stop_loss",
+        "orjinal_stop", "marjin", "kaldirac", "pozisyon_usd",
+        "durum", "kâr_r", "kâr_usd", "is_be", "tarih"
+    ]
+
+    # Eğer tablo yoksa veya kritik kolonlar eksikse yeniden oluştur
+    if not kolonlar or "pozisyon_usd" not in kolonlar or "marjin" not in kolonlar:
+        print("→ Eski veritabanı şeması tespit edildi, yeniden oluşturuluyor...")
+        c.execute("DROP TABLE IF EXISTS islemler")
+        c.execute("""CREATE TABLE islemler (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            coin TEXT,
+            yon TEXT,
+            giris_fiyati REAL,
+            hedef_r1 REAL,
+            stop_loss REAL,
+            orjinal_stop REAL,
+            marjin REAL DEFAULT 15.0,
+            kaldirac INTEGER DEFAULT 5,
+            pozisyon_usd REAL DEFAULT 75.0,
+            durum TEXT,
+            kâr_r REAL DEFAULT 0.0,
+            kâr_usd REAL DEFAULT 0.0,
+            is_be INTEGER DEFAULT 0,
+            tarih TEXT
+        )""")
+        print("→ Veritabanı tabloları güncellendi.")
+
     conn.commit()
     conn.close()
 
 def bakiye_guncelle(pnl_usd: float):
     conn, c = db_baglanti()
     c.execute("SELECT bakiye FROM cuzdan ORDER BY id DESC LIMIT 1")
-    mevcut = c.fetchone()[0]
+    row = c.fetchone()
+    mevcut = row[0] if row else ILK_BAKIYE
     yeni = mevcut + pnl_usd
     c.execute("UPDATE cuzdan SET bakiye=? WHERE id=(SELECT MAX(id) FROM cuzdan)", (yeni,))
     conn.commit()
@@ -575,7 +610,8 @@ def telegram_foto(path, caption=""):
 # ==========================================
 def acik_islemleri_kontrol(guncel_fiyatlar: dict):
     conn, c = db_baglanti()
-    c.execute("SELECT id, coin, yon, giris_fiyati, hedef_r1, stop_loss, orjinal_stop, is_be, pozisyon_usd, marjin FROM islemler WHERE durum='ACIK'")
+    c.execute("""SELECT id, coin, yon, giris_fiyati, hedef_r1, stop_loss, orjinal_stop, 
+                        is_be, pozisyon_usd, marjin FROM islemler WHERE durum='ACIK'""")
     rows = c.fetchall()
 
     for row in rows:
@@ -726,7 +762,8 @@ Toplam R (kümülatif): {toplam_r:.2f}
 def saatlik_rapor_gonder(guncel_fiyatlar: dict):
     conn, c = db_baglanti()
     c.execute("SELECT bakiye FROM cuzdan ORDER BY id DESC LIMIT 1")
-    bakiye = c.fetchone()[0]
+    row = c.fetchone()
+    bakiye = row[0] if row else ILK_BAKIYE
 
     c.execute("SELECT coin, yon, giris_fiyati, pozisyon_usd FROM islemler WHERE durum='ACIK'")
     aciklar = c.fetchall()
