@@ -20,7 +20,7 @@ import mplfinance as mpf
 from flask import Flask
 
 # ==========================================
-# 1. FLASK KEEP-ALIVE SERVER
+# 1. FLASK KEEP-ALIVE
 # ==========================================
 app = Flask(__name__)
 
@@ -104,13 +104,14 @@ def veri_cek(symbol: str, bar: str = "4H", limit: int = 250) -> pd.DataFrame | N
         df["timestamp"] = pd.to_datetime(df["ts"].astype(float), unit="ms")
         df.set_index("timestamp", inplace=True)
         df = df[["open", "high", "low", "close", "volume"]].dropna()
+        df = df.sort_index(ascending=True)  # Eski → Yeni (ters olmasın)
         return df if len(df) >= 60 else None
     except Exception as e:
         print(f"Veri çekme hatası {symbol}: {e}")
         return None
 
 # ==========================================
-# 4. TEKNİK & SMC ANALİZİ (Gelişmiş)
+# 4. TEKNİK & SMC ANALİZİ
 # ==========================================
 def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
     if df is None or len(df) < 60:
@@ -123,7 +124,6 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
     df["MA200"] = ta.sma(df["close"], length=200)
     df["ATR"] = ta.atr(df["high"], df["low"], df["close"], length=14)
 
-    # --- Swing High / Low ---
     def find_swings(series, order=4):
         highs, lows = [], []
         for i in range(order, len(series) - order):
@@ -140,43 +140,25 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
     last_swing_high = swing_highs[-1][1] if swing_highs else safe_max(df["high"].iloc[-40:])
     last_swing_low = swing_lows[-1][1] if swing_lows else safe_min(df["low"].iloc[-40:])
 
-    # --- FVG ---
     df["FVG_up"] = (df["low"].shift(-1) > df["high"].shift(1)) & (df["close"] > df["open"])
     df["FVG_down"] = (df["high"].shift(-1) < df["low"].shift(1)) & (df["close"] < df["open"])
 
     fvg_zones = []
     for i in range(max(0, len(df) - 12), len(df) - 1):
         if df["FVG_up"].iloc[i]:
-            fvg_zones.append({
-                "type": "bullish",
-                "top": float(df["low"].iloc[i + 1]),
-                "bottom": float(df["high"].iloc[i - 1]),
-            })
+            fvg_zones.append({"type": "bullish", "top": float(df["low"].iloc[i + 1]), "bottom": float(df["high"].iloc[i - 1])})
         if df["FVG_down"].iloc[i]:
-            fvg_zones.append({
-                "type": "bearish",
-                "top": float(df["low"].iloc[i - 1]),
-                "bottom": float(df["high"].iloc[i + 1]),
-            })
+            fvg_zones.append({"type": "bearish", "top": float(df["low"].iloc[i - 1]), "bottom": float(df["high"].iloc[i + 1])})
 
-    # --- Order Block ---
     ob_zones = []
     atr_val = float(df["ATR"].iloc[-1]) if pd.notna(df["ATR"].iloc[-1]) else float(df["close"].iloc[-1]) * 0.02
     for i in range(max(0, len(df) - 18), len(df) - 2):
         body = abs(df["close"].iloc[i] - df["open"].iloc[i])
         if body > atr_val * 0.85:
             if df["close"].iloc[i] > df["open"].iloc[i]:
-                ob_zones.append({
-                    "type": "bullish",
-                    "top": float(df["high"].iloc[i]),
-                    "bottom": float(df["low"].iloc[i]),
-                })
+                ob_zones.append({"type": "bullish", "top": float(df["high"].iloc[i]), "bottom": float(df["low"].iloc[i])})
             else:
-                ob_zones.append({
-                    "type": "bearish",
-                    "top": float(df["high"].iloc[i]),
-                    "bottom": float(df["low"].iloc[i]),
-                })
+                ob_zones.append({"type": "bearish", "top": float(df["high"].iloc[i]), "bottom": float(df["low"].iloc[i])})
 
     son = df.iloc[-1]
     onceki = df.iloc[-2] if len(df) > 1 else son
@@ -190,7 +172,6 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
     bos_high = safe_max(df["high"].iloc[-look:-1]) if len(df) > look else safe_max(df["high"].iloc[:-1])
     bos_low = safe_min(df["low"].iloc[-look:-1]) if len(df) > look else safe_min(df["low"].iloc[:-1])
 
-    # Equal High / Low
     eq_look = min(20, len(df) - 1)
     equal_high = equal_low = False
     tol = atr_val * 0.25
@@ -205,7 +186,6 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
             equal_low = True
             break
 
-    # Fibonacci
     fib_range = last_swing_high - last_swing_low if last_swing_high > last_swing_low else 0
     fib_levels = {}
     if fib_range > 0:
@@ -307,7 +287,6 @@ def skor_hesapla(info: dict) -> tuple[float, list, str]:
         skor_s += 1.12
         krit_s.append("PO3: 1.12 - Bearish AMD/PO3 proxy")
 
-    # Fibonacci
     fib_zone = info.get("fib_zone", "Neutral")
     skor_l += info.get("fib_score_l", 0.75)
     skor_s += info.get("fib_score_s", 0.75)
@@ -415,7 +394,7 @@ def analiz_yap(symbol: str):
     return skor, kriterler, info["fiyat"], df_4h, yon, mtf_list, mtf_bonus, info
 
 # ==========================================
-# 5. GRAFİK OLUŞTURMA (Gelişmiş)
+# 5. GRAFİK (BEYAZ TEMA + TERS OLMAYAN)
 # ==========================================
 def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float, info: dict = None) -> str | None:
     with matplotlib_lock:
@@ -423,7 +402,10 @@ def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float, info: dict 
             if df is None or len(df) < 30:
                 return None
 
-            df_plot = df.tail(min(120, len(df))).copy()
+            # Zamanı kesinlikle eski → yeni yap
+            df_plot = df.copy().sort_index(ascending=True)
+            df_plot = df_plot.tail(min(120, len(df_plot)))
+
             if len(df_plot) < 20:
                 return None
 
@@ -437,27 +419,43 @@ def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float, info: dict 
             ma200 = df_plot['Close'].rolling(window=200, min_periods=30).mean()
 
             addplots = []
-            if ma50.notna().sum() > 10:
-                addplots.append(mpf.make_addplot(ma50, color='#42a5f5', width=1.2))
-            if ma100.notna().sum() > 10:
-                addplots.append(mpf.make_addplot(ma100, color='#ffa726', width=1.2))
-            if ma200.notna().sum() > 10:
-                addplots.append(mpf.make_addplot(ma200, color='#66bb6a', width=1.5))
+            if ma50.notna().sum() > 8:
+                addplots.append(mpf.make_addplot(ma50, color='#1e88e5', width=1.4))
+            if ma100.notna().sum() > 8:
+                addplots.append(mpf.make_addplot(ma100, color='#fb8c00', width=1.4))
+            if ma200.notna().sum() > 8:
+                addplots.append(mpf.make_addplot(ma200, color='#43a047', width=1.6))
 
-            hlines = {"hlines": [], "colors": [], "linestyle": "-.", "linewidths": 1.1}
+            hlines = dict(hlines=[], colors=[], linestyle='--', linewidths=1.0, alpha=0.75)
             if info and info.get("fib_levels"):
                 for price in info["fib_levels"].values():
                     hlines["hlines"].append(price)
-                    hlines["colors"].append("#ce93d8")
+                    hlines["colors"].append('#5c6bc0')
 
-            mc = mpf.make_marketcolors(up='#26a69a', down='#ef5350', edge='inherit', wick='inherit', volume='in')
+            mc = mpf.make_marketcolors(
+                up='#26a69a',
+                down='#ef5350',
+                edge='inherit',
+                wick={'up': '#26a69a', 'down': '#ef5350'},
+                volume='in'
+            )
+
             s = mpf.make_mpf_style(
-                base_mpf_style='nightclouds',
+                base_mpf_style='yahoo',
                 marketcolors=mc,
-                gridcolor='#2a2e39',
-                facecolor='#131722',
-                edgecolor='#131722',
-                figcolor='#131722'
+                facecolor='white',
+                edgecolor='#e0e0e0',
+                figcolor='white',
+                gridcolor='#f0f0f0',
+                gridstyle='-',
+                y_on_right=False,
+                rc={
+                    'axes.labelcolor': '#333333',
+                    'xtick.color': '#555555',
+                    'ytick.color': '#555555',
+                    'axes.titlesize': 11,
+                    'axes.titleweight': 'bold'
+                }
             )
 
             dosya = os.path.join(ARTIFACT_DIR, f"{symbol.replace('-', '_')}_chart.png")
@@ -468,26 +466,31 @@ def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float, info: dict 
                 style=s,
                 addplot=addplots if addplots else None,
                 hlines=hlines if hlines["hlines"] else None,
-                title=f"\n{symbol} | {yon} 5x Isolated | Skor: {skor:.2f}/20 | 4H",
+                title=f"{symbol.replace('-', '/')} | {yon} | Skor: {skor:.2f}/20 | 4H",
                 returnfig=True,
-                volume=True,
-                figsize=(13, 8),
+                volume=False,
+                figsize=(12, 6.5),
                 tight_layout=True,
-                panel_ratios=(0.78, 0.22)
+                datetime_format='%m-%d',
+                xrotation=0,
+                scale_padding=0.04
             )
 
             ax = axes[0]
 
             if info:
                 for z in info.get("fvg_zones", []):
-                    color = "#26a69a55" if z["type"] == "bullish" else "#ef535055"
+                    color = '#bbdefb90' if z["type"] == "bullish" else '#ffcdd290'
                     ax.axhspan(z["bottom"], z["top"], facecolor=color, edgecolor=None, zorder=0)
 
                 for z in info.get("ob_zones", []):
-                    color = "#42a5f570" if z["type"] == "bullish" else "#ef535070"
-                    ax.axhspan(z["bottom"], z["top"], facecolor=color, edgecolor="#ffffff30", linewidth=0.7, zorder=1)
+                    color = '#90caf990' if z["type"] == "bullish" else '#ef9a9a90'
+                    ax.axhspan(z["bottom"], z["top"], facecolor=color, edgecolor='#ffffff40', linewidth=0.5, zorder=1)
 
-            fig.savefig(dosya, dpi=150, bbox_inches='tight', facecolor='#131722')
+            ax.set_ylabel("Price", fontsize=10, color='#333333')
+            ax.tick_params(colors='#555555')
+
+            fig.savefig(dosya, dpi=160, bbox_inches='tight', facecolor='white', edgecolor='none')
             plt.close(fig)
             return dosya
 
@@ -497,7 +500,7 @@ def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float, info: dict 
             return None
 
 # ==========================================
-# 6. VERİTABANI, CÜZDAN & TELEGRAM
+# 6. VERİTABANI & TELEGRAM
 # ==========================================
 def db_baglanti():
     db_path = os.path.join(ARTIFACT_DIR, "islemler.db")
