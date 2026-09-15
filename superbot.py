@@ -21,7 +21,7 @@ import mplfinance as mpf
 from flask import Flask
 
 # ==========================================
-# 1. FLASK KEEP-ALIVE SERVER (Render Free Tier)
+# 1. FLASK KEEP-ALIVE SERVER
 # ==========================================
 app = Flask(__name__)
 
@@ -30,22 +30,26 @@ def health_check():
     return "OK - Kripto Sinyal Botu Aktif ve Çalışıyor", 200
 
 def run_flask():
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.environ.get("PORT", 10003))
     app.run(host="0.0.0.0", port=port)
 
 # ==========================================
 # 2. AYARLAR & ORTAM DEĞİŞKENLERİ
 # ==========================================
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 ARTIFACT_DIR = os.environ.get("ARTIFACT_DIR", "./artifacts")
 RUN_ONCE = os.environ.get("RUN_ONCE", "false").lower() in ["true", "1", "yes"]
 TARAMA_ARALIGI_DURMA_SANIYE = int(os.environ.get("TARAMA_ARALIGI_DURMA_SANIYE", "3600"))
 
-os.makedirs(ARTIFACT_DIR, exist_ok=True)
+# POZİSYON VE CÜZDAN AYARLARI
+ILK_BAKIYE = 500.0
+MARJIN_USD = 15.0
+KALDIRAC = 5
+POZISYON_USD = MARJIN_USD * KALDIRAC  # 75.0 USD Toplam Pozisyon Büyüklüğü
 
-# Matplotlib eşzamanlı çakışmalarını önlemek için kilit
+os.makedirs(ARTIFACT_DIR, exist_ok=True)
 matplotlib_lock = threading.Lock()
 
 HEDEF_COINLER = [
@@ -63,15 +67,13 @@ MIN_SKOR = 15.0
 OKX_BASE = "https://www.okx.com"
 
 # ==========================================
-# GÜVENLİ MİN / MAX (boş dizi + NaN + Inf koruması)
+# GÜVENLİ MİN / MAX
 # ==========================================
 def safe_max(series_or_array):
     try:
         arr = np.asarray(series_or_array, dtype=float)
         arr = arr[np.isfinite(arr)]
-        if arr.size == 0:
-            return np.nan
-        return float(np.max(arr))
+        return float(np.max(arr)) if arr.size > 0 else np.nan
     except Exception:
         return np.nan
 
@@ -79,9 +81,7 @@ def safe_min(series_or_array):
     try:
         arr = np.asarray(series_or_array, dtype=float)
         arr = arr[np.isfinite(arr)]
-        if arr.size == 0:
-            return np.nan
-        return float(np.min(arr))
+        return float(np.min(arr)) if arr.size > 0 else np.nan
     except Exception:
         return np.nan
 
@@ -119,7 +119,6 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
         return {}
 
     df = df.copy()
-    
     df["RSI"] = ta.rsi(df["close"], length=14)
     df["MA50"] = ta.sma(df["close"], length=50)
     df["MA100"] = ta.sma(df["close"], length=100)
@@ -276,12 +275,9 @@ def mtf_analiz(symbol: str) -> tuple[list, float, float]:
         skor_approx = 8.0 + (2.0 if t == 1 else 0)
         mtf_list.append(f"• {label}: {yon} ({skor_approx:.2f}/18)")
         
-        if label == "1D":
-            t1 = t
-        elif label == "4H":
-            t4 = t
-        else:
-            t1h = t
+        if label == "1D": t1 = t
+        elif label == "4H": t4 = t
+        else: t1h = t
 
     bonus_l = 2.0 if (t1 == 1 and t4 == 1 and t1h == 1) else 0.0
     bonus_s = 2.0 if (t1 == -1 and t4 == -1 and t1h == -1) else 0.0
@@ -305,19 +301,16 @@ def analiz_yap(symbol: str):
     return skor, kriterler, info["fiyat"], df_4h, yon, mtf_list, mtf_bonus
 
 # ==========================================
-# 5. GÜVENLİ GRAFİK OLUŞTURMA (Thread-Safe)
+# 5. GRAFİK OLUŞTURMA
 # ==========================================
 def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float) -> str | None:
     with matplotlib_lock:
         try:
             if df is None or len(df) < 30:
-                print(f"Grafik için yetersiz veri: {symbol} (len={len(df) if df is not None else 0})")
                 return None
 
             df_plot = df.tail(min(100, len(df))).copy()
-            
             if len(df_plot) < 20:
-                print(f"Grafik için çok az mum: {symbol}")
                 return None
 
             df_plot = df_plot.rename(columns={
@@ -354,7 +347,7 @@ def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float) -> str | No
                 type='candle',
                 style=s,
                 addplot=addplots if addplots else None,
-                title=f"\n{symbol} | {yon} | Skor: {skor:.2f}/20 | 4H",
+                title=f"\n{symbol} | {yon} 5x Isolated | Skor: {skor:.2f}/20 | 4H",
                 returnfig=True,
                 volume=False,
                 figsize=(11, 6),
@@ -367,11 +360,11 @@ def grafik_ciz(df: pd.DataFrame, symbol: str, yon: str, skor: float) -> str | No
 
         except Exception as e:
             plt.close('all')
-            print(f"Grafik çizim detay hatası ({symbol}): {e}")
+            print(f"Grafik çizim hatası ({symbol}): {e}")
             return None
 
 # ==========================================
-# 6. VERİTABANI & TELEGRAM BİLDİRİMLERİ
+# 6. VERİTABANI, CÜZDAN & TELEGRAM
 # ==========================================
 def db_baglanti():
     db_path = os.path.join(ARTIFACT_DIR, "islemler.db")
@@ -381,29 +374,58 @@ def db_baglanti():
 def db_kurulum():
     conn, c = db_baglanti()
     c.execute("""
+        CREATE TABLE IF NOT EXISTS cuzdan (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bakiye REAL DEFAULT 500.0
+        )
+    """)
+    c.execute("SELECT COUNT(*) FROM cuzdan")
+    if c.fetchone()[0] == 0:
+        c.execute("INSERT INTO cuzdan (bakiye) VALUES (?)", (ILK_BAKIYE,))
+
+    c.execute("""
         CREATE TABLE IF NOT EXISTS islemler (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             coin TEXT, yon TEXT, giris_fiyati REAL, hedef_r1 REAL, stop_loss REAL,
-            orjinal_stop REAL, durum TEXT, kâr_r REAL, is_be INTEGER DEFAULT 0, tarih TEXT
+            orjinal_stop REAL, marjin REAL DEFAULT 15.0, kaldirac INTEGER DEFAULT 5,
+            pozisyon_usd REAL DEFAULT 75.0, durum TEXT, kâr_r REAL, kâr_usd REAL DEFAULT 0.0,
+            is_be INTEGER DEFAULT 0, tarih TEXT
         )
     """)
     conn.commit()
     conn.close()
 
+def bakiye_guncelle(pnl_usd: float):
+    conn, c = db_baglanti()
+    c.execute("SELECT bakiye FROM cuzdan ORDER BY id DESC LIMIT 1")
+    mevcut = c.fetchone()[0]
+    yeni_bakiye = mevcud + pnl_usd if 'mevcud' in locals() else mevcut + pnl_usd
+    c.execute("UPDATE cuzdan SET bakiye=? WHERE id=(SELECT MAX(id) FROM cuzdan)", (yeni_bakiye,))
+    conn.commit()
+    conn.close()
+    return yeni_bakiye
+
 def islem_kaydet(coin: str, yon: str, giris: float, stop: float):
     conn, c = db_baglanti()
+    c.execute("SELECT id FROM islemler WHERE coin=? AND durum='ACIK'", (coin,))
+    if c.fetchone():
+        conn.close()
+        return
+
     risk = abs(giris - stop) or (giris * 0.02)
     hedef = giris + (risk * 1.5) if yon == "LONG" else giris - (risk * 1.5)
     tarih = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     c.execute("""
-        INSERT INTO islemler (coin, yon, giris_fiyati, hedef_r1, stop_loss, orjinal_stop, durum, kâr_r, is_be, tarih)
-        VALUES (?, ?, ?, ?, ?, ?, 'ACIK', 0.0, 0, ?)
-    """, (coin, yon, giris, hedef, stop, stop, tarih))
+        INSERT INTO islemler (coin, yon, giris_fiyati, hedef_r1, stop_loss, orjinal_stop, marjin, kaldirac, pozisyon_usd, durum, kâr_r, kâr_usd, is_be, tarih)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACIK', 0.0, 0.0, 0, ?)
+    """, (coin, yon, giris, hedef, stop, stop, MARJIN_USD, KALDIRAC, POZISYON_USD, tarih))
     conn.commit()
     conn.close()
 
 def telegram_mesaj(text: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram Token veya Chat ID eksik!")
         return
     try:
         requests.post(
@@ -412,7 +434,7 @@ def telegram_mesaj(text: str):
             timeout=10
         )
     except Exception as e:
-        print(f"Telegram mesaj hata: {e}")
+        print(f"Telegram mesaj hatası: {e}")
 
 def telegram_foto(path: str, caption: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -422,99 +444,144 @@ def telegram_foto(path: str, caption: str):
         return
     try:
         with open(path, "rb") as f:
-            response = requests.post(
+            requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
                 files={"photo": f},
                 data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "HTML"},
                 timeout=30
             )
-            if response.status_code != 200:
-                print(f"Telegram Foto Hata Yanıtı: {response.text}")
-                telegram_mesaj(caption)
     except Exception as e:
         print(f"Grafik gönderme hatası: {e}")
         telegram_mesaj(caption)
 
 def acik_islemleri_kontrol(guncel_fiyatlar: dict):
     conn, c = db_baglanti()
-    c.execute("SELECT id, coin, yon, giris_fiyati, hedef_r1, stop_loss, orjinal_stop, is_be FROM islemler WHERE durum='ACIK'")
+    c.execute("SELECT id, coin, yon, giris_fiyati, hedef_r1, stop_loss, orjinal_stop, is_be, pozisyon_usd, marjin FROM islemler WHERE durum='ACIK'")
     rows = c.fetchall()
 
     for row in rows:
-        islem_id, coin, yon, giris, hedef, stop, orj_stop, is_be = row
+        islem_id, coin, yon, giris, hedef, stop, orj_stop, is_be, poz_usd, marjin = row
         if coin not in guncel_fiyatlar:
             continue
         anlik = guncel_fiyatlar[coin]
         risk = abs(giris - (orj_stop or stop))
-        if risk <= 0:
-            continue
+        if risk <= 0: continue
+
         mevcut_r = (anlik - giris) / risk if yon == "LONG" else (giris - anlik) / risk
 
         if mevcut_r >= 1.0 and is_be == 0:
             c.execute("UPDATE islemler SET stop_loss=?, is_be=1 WHERE id=?", (giris, islem_id))
-            telegram_mesaj(f"🛡 <b>STOPU GİRİŞE ÇEK (BE)</b>\n\n📌 <b>{coin} ({yon})</b>\n📈 İşlem +1R kâra geçti!\n🎯 Stop fiyatı: {giris}")
+            telegram_mesaj(f"🛡 <b>STOPU GİRİŞE ÇEK (BE)</b>\n\n📌 <b>{coin} ({yon} 5x)</b>\n📈 +1R kâra ulaşıldı!\n🎯 Yeni Stop: {giris:.6f}")
             is_be = 1
 
+        # Kapanış Kontrolleri ve PnL (USD) Hesabı
         if yon == "LONG":
             if anlik >= hedef:
-                telegram_mesaj(f"✅ <b>{coin} (LONG)</b>\n💰 Hedefe Ulaştı! (+1.50R)")
-                c.execute("UPDATE islemler SET durum='WIN', kâr_r=1.5 WHERE id=?", (islem_id,))
+                pnl_usd = (poz_usd * 0.03)  # Risk/ödül oranına göre ~1.5R kâr
+                yeni_b = bakiye_guncelle(pnl_usd)
+                telegram_mesaj(f"✅ <b>{coin} (LONG 5x)</b>\n💰 Hedef TP1 (+1.50R) Ulaşıldı!\n💵 Kâr: +${pnl_usd:.2f}\n🏦 Cüzdan: ${yeni_b:.2f}")
+                c.execute("UPDATE islemler SET durum='WIN', kâr_r=1.5, kâr_usd=? WHERE id=?", (pnl_usd, islem_id))
             elif anlik <= stop:
                 durum, r_val = ('BE', 0.0) if is_be else ('LOSS', -1.0)
-                telegram_mesaj(f"{'🛡' if is_be else '❌'} <b>{coin} (LONG)</b>\n{'Başabaş Kapanış' if is_be else 'Stop Oldu'} ({r_val:+.2f}R)")
-                c.execute("UPDATE islemler SET durum=?, kâr_r=? WHERE id=?", (durum, r_val, islem_id))
+                pnl_usd = 0.0 if is_be else -marjin
+                yeni_b = bakiye_guncelle(pnl_usd)
+                telegram_mesaj(f"{'🛡' if is_be else '❌'} <b>{coin} (LONG 5x)</b>\n{'Başabaş Kapanış (0R)' if is_be else 'Stop Oldu (-1R)'}\n💵 PnL: ${pnl_usd:+.2f}\n🏦 Cüzdan: ${yeni_b:.2f}")
+                c.execute("UPDATE islemler SET durum=?, kâr_r=?, kâr_usd=? WHERE id=?", (durum, r_val, pnl_usd, islem_id))
         else:
             if anlik <= hedef:
-                telegram_mesaj(f"✅ <b>{coin} (SHORT)</b>\n💰 Hedefe Ulaştı! (+1.50R)")
-                c.execute("UPDATE islemler SET durum='WIN', kâr_r=1.5 WHERE id=?", (islem_id,))
+                pnl_usd = (poz_usd * 0.03)
+                yeni_b = bakiye_guncelle(pnl_usd)
+                telegram_mesaj(f"✅ <b>{coin} (SHORT 5x)</b>\n💰 Hedef TP1 (+1.50R) Ulaşıldı!\n💵 Kâr: +${pnl_usd:.2f}\n🏦 Cüzdan: ${yeni_b:.2f}")
+                c.execute("UPDATE islemler SET durum='WIN', kâr_r=1.5, kâr_usd=? WHERE id=?", (pnl_usd, islem_id))
             elif anlik >= stop:
                 durum, r_val = ('BE', 0.0) if is_be else ('LOSS', -1.0)
-                telegram_mesaj(f"{'🛡' if is_be else '❌'} <b>{coin} (SHORT)</b>\n{'Başabaş Kapanış' if is_be else 'Stop Oldu'} ({r_val:+.2f}R)")
-                c.execute("UPDATE islemler SET durum=?, kâr_r=? WHERE id=?", (durum, r_val, islem_id))
+                pnl_usd = 0.0 if is_be else -marjin
+                yeni_b = bakiye_guncelle(pnl_usd)
+                telegram_mesaj(f"{'🛡' if is_be else '❌'} <b>{coin} (SHORT 5x)</b>\n{'Başabaş Kapanış (0R)' if is_be else 'Stop Oldu (-1R)'}\n💵 PnL: ${pnl_usd:+.2f}\n🏦 Cüzdan: ${yeni_b:.2f}")
+                c.execute("UPDATE islemler SET durum=?, kâr_r=?, kâr_usd=? WHERE id=?", (durum, r_val, pnl_usd, islem_id))
 
     conn.commit()
     conn.close()
 
 # ==========================================
-# 7. RAPOR & MESAJ GÖNDERİMİ
+# 7. SAATLİK PERFORMANS VE CÜZDAN RAPORU
 # ==========================================
+def saatlik_rapor_gonder(guncel_fiyatlar: dict):
+    conn, c = db_baglanti()
+    c.execute("SELECT bakiye FROM cuzdan ORDER BY id DESC LIMIT 1")
+    row_bakiye = c.fetchone()
+    bakiye = row_bakiye[0] if row_bakiye else 500.0
+
+    c.execute("SELECT coin, yon, giris_fiyati, pozisyon_usd FROM islemler WHERE durum='ACIK'")
+    acik_islemler = c.fetchall()
+
+    unrealized_pnl = 0.0
+    acik_detay = ""
+
+    for coin, yon, giris, poz_usd in acik_islemler:
+        anlik = guncel_fiyatlar.get(coin, giris)
+        pnl = poz_usd * ((anlik - giris) / giris) if yon == "LONG" else poz_usd * ((giris - anlik) / giris)
+        unrealized_pnl += pnl
+        yuzde = ((anlik - giris) / giris * 100) if yon == "LONG" else ((giris - anlik) / giris * 100)
+        acik_detay += f"• <b>{coin}</b> ({yon} 5x): ${pnl:+.2f} (%{yuzde*5:+.2f})\n"
+
+    c.execute("SELECT COUNT(*), SUM(kâr_usd) FROM islemler WHERE durum!='ACIK'")
+    kapanan_count, toplam_kapanan_pnl = c.fetchone()
+    toplam_kapanan_pnl = toplam_kapanan_pnl or 0.0
+
+    c.execute("SELECT COUNT(*) FROM islemler WHERE durum='WIN'")
+    win_count = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM islemler WHERE durum='LOSS'")
+    loss_count = c.fetchone()[0]
+
+    toplam_varlik = bakiye + unrealized_pnl
+
+    rapor = "📊 <b>SAATLİK PERFORMANS VE CÜZDAN RAPORU</b>\n"
+    rapor += "────────────────────\n"
+    rapor += f"💵 <b>Kullanılabilir Bakiye:</b> ${bakiye:.2f}\n"
+    rapor += f"📈 <b>Açık Pozisyon PnL:</b> ${unrealized_pnl:+.2f}\n"
+    rapor += f"💎 <b>Toplam Varlık:</b> ${toplam_varlik:.2f}\n\n"
+    
+    rapor += f"🔓 <b>Açık Pozisyonlar ({len(acik_islemler)}):</b>\n"
+    rapor += (acik_detay if acik_detay else "• Şu an açık pozisyon yok.\n") + "\n"
+        
+    rapor += f"📜 <b>Kapanan İşlemler:</b> {kapanan_count} Adet\n"
+    rapor += f"✅ Win: {win_count} | ❌ Loss: {loss_count}\n"
+    rapor += f"💰 Realize Edilen PnL: ${toplam_kapanan_pnl:+.2f}\n"
+    rapor += "────────────────────"
+
+    telegram_mesaj(rapor)
+    conn.close()
+
 def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus):
     atr = ta.atr(df["high"], df["low"], df["close"], 14).iloc[-1]
-    if pd.isna(atr) or atr <= 0:
-        atr = fiyat * 0.02
+    if pd.isna(atr) or atr <= 0: atr = fiyat * 0.02
         
     stop = fiyat - (atr * 1.5) if yon == "LONG" else fiyat + (atr * 1.5)
     hedef = (fiyat + (fiyat - stop) * 1.5) if yon == 'LONG' else (fiyat - (stop - fiyat) * 1.5)
 
-    mesaj = f"🧠 <b>{symbol.replace('-', '/')} – {yon}</b>\n"
+    mesaj = f"🧠 <b>{symbol.replace('-', '/')} – {yon} (5x Izole)</b>\n"
     mesaj += f"⭐ Skor: {skor:.2f}/20\n"
-    mesaj += f"⏱ MTF bonus: +{mtf_bonus:.2f}/2\n\n"
+    mesaj += f"💼 Marjin: ${MARJIN_USD} | Pozisyon: ${POZISYON_USD}\n\n"
     
-    mesaj += "<b>4H kriterleri:</b>\n"
-    for k in kriterler:
-        mesaj += f"• {k}\n"
+    mesaj += "<b>4H Kriterleri:</b>\n"
+    for k in kriterler: mesaj += f"• {k}\n"
     
-    mesaj += "\n<b>Zaman dilimleri:</b>\n"
-    for m in mtf_list:
-        mesaj += f"{m}\n"
+    mesaj += "\n<b>Zaman Dilimleri:</b>\n"
+    for m in mtf_list: mesaj += f"{m}\n"
     
     mesaj += "\n────────────────────\n\n"
-    
-    mesaj += f"💰 <b>GİRİŞ</b>\n{fiyat:.6f}\n\n"
-    mesaj += f"🛡️ <b>SL (Stop Loss)</b>\n{stop:.6f}\n\n"
-    mesaj += f"🎯 <b>TP (Take Profit 1.5R)</b>\n{hedef:.6f}\n\n"
-    
-    mesaj += "⚠️ Bu bot yalnızca teknik/algoritmik analiz üretir; garanti edilmiş fiyat hareketi ifade etmez."
+    mesaj += f"💰 <b>GİRİŞ:</b> {fiyat:.6f}\n"
+    mesaj += f"🛡️ <b>SL:</b> {stop:.6f}\n"
+    mesaj += f"🎯 <b>TP (1.5R):</b> {hedef:.6f}\n\n"
+    mesaj += "⚠️ Algoritmik sinyaldir, yatırım tavsiyesi değildir."
 
     try:
         foto = grafik_ciz(df, symbol, yon, skor)
-        kisa_baslik = f"🧠 <b>{symbol.replace('-', '/')} – {yon}</b> | Skor: {skor:.2f}/20"
-        
+        kisa_baslik = f"🧠 <b>{symbol.replace('-', '/')} – {yon} 5x</b> | Skor: {skor:.2f}/20"
         if foto:
             telegram_foto(foto, kisa_baslik)
-        else:
-            print(f"Grafik oluşturulamadı, sadece metin gönderiliyor: {symbol}")
-        
         telegram_mesaj(mesaj)
     except Exception as e:
         print(f"Gönderim hatası: {e}")
@@ -542,9 +609,12 @@ def tek_seferlik_tarama():
             print(f"Hata ({coin}): {e}")
 
     acik_islemleri_kontrol(guncel)
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Tarama tamamlandı.")
+    saatlik_rapor_gonder(guncel)
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Tarama ve saatlik rapor tamamlandı.")
 
 if __name__ == "__main__":
+    telegram_mesaj("🚀 <b>SMC & MTF Bot Başlatıldı!</b>\n\n💰 Cüzdan: $500\n⚡ Kaldıraç: 5x Izole ($15 Marjin)\n⏱ Tarama aralığı: 1 Saat")
+
     if RUN_ONCE:
         tek_seferlik_tarama()
     else:
