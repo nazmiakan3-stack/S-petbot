@@ -15,7 +15,6 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import mplfinance as mpf
-from matplotlib.table import Table
 
 from flask import Flask
 
@@ -175,12 +174,14 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
     eq_look = min(20, len(df)-1)
     equal_high = equal_low = False
     tol = atr_val * 0.25
-    for i in range(len(df["high"].iloc[-eq_look:])-1):
-        if abs(df["high"].iloc[-eq_look+i] - df["high"].iloc[-1]) < tol:
+    highs = df["high"].iloc[-eq_look:]
+    lows = df["low"].iloc[-eq_look:]
+    for i in range(len(highs)-1):
+        if abs(highs.iloc[i] - highs.iloc[-1]) < tol:
             equal_high = True
             break
-    for i in range(len(df["low"].iloc[-eq_look:])-1):
-        if abs(df["low"].iloc[-eq_look+i] - df["low"].iloc[-1]) < tol:
+    for i in range(len(lows)-1):
+        if abs(lows.iloc[i] - lows.iloc[-1]) < tol:
             equal_low = True
             break
 
@@ -207,8 +208,11 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
                 fib_score_l, fib_score_s = 0.50, 1.12
 
     return {
-        "fiyat": fiyat, "rsi": float(son["RSI"]) if pd.notna(son["RSI"]) else 50.0, "atr": atr_val,
-        "bullish_fvg": bool(df["FVG_up"].iloc[-5:].any()), "bearish_fvg": bool(df["FVG_down"].iloc[-5:].any()),
+        "fiyat": fiyat,
+        "rsi": float(son["RSI"]) if pd.notna(son["RSI"]) else 50.0,
+        "atr": atr_val,
+        "bullish_fvg": bool(df["FVG_up"].iloc[-5:].any()),
+        "bearish_fvg": bool(df["FVG_down"].iloc[-5:].any()),
         "above_ma200": fiyat > (float(son["MA200"]) if pd.notna(son["MA200"]) else 0),
         "above_ma100": fiyat > (float(son["MA100"]) if pd.notna(son["MA100"]) else 0),
         "above_ma50": fiyat > (float(son["MA50"]) if pd.notna(son["MA50"]) else 0),
@@ -216,11 +220,16 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
         "buyside_sweep": (not np.isnan(recent_high)) and son["high"] > recent_high and son["close"] < recent_high,
         "bullish_bos": (not np.isnan(bos_high)) and son["close"] > bos_high,
         "bearish_bos": (not np.isnan(bos_low)) and son["close"] < bos_low,
-        "bullish_ob": (onceki["close"] > onceki["open"]) and (onceki["close"] - onceki["open"]) > atr_val * 0.8,
-        "bearish_ob": (onceki["close"] < onceki["open"]) and (onceki["open"] - onceki["close"]) > atr_val * 0.8,
-        "equal_high": equal_high, "equal_low": equal_low,
-        "fib_zone": fib_zone, "fib_score_l": fib_score_l, "fib_score_s": fib_score_s,
-        "fib_levels": fib_levels, "fvg_zones": fvg_zones[-4:], "ob_zones": ob_zones[-4:],
+        "bullish_ob": (onceki["close"] > onceki["open"]) and ((onceki["close"] - onceki["open"]) > atr_val * 0.8),
+        "bearish_ob": (onceki["close"] < onceki["open"]) and ((onceki["open"] - onceki["close"]) > atr_val * 0.8),
+        "equal_high": equal_high,
+        "equal_low": equal_low,
+        "fib_zone": fib_zone,
+        "fib_score_l": fib_score_l,
+        "fib_score_s": fib_score_s,
+        "fib_levels": fib_levels,
+        "fvg_zones": fvg_zones[-4:],
+        "ob_zones": ob_zones[-4:],
     }
 
 def skor_hesapla(info: dict):
@@ -356,18 +365,22 @@ def analiz_yap(symbol: str):
     return skor, kriterler, info["fiyat"], df, yon, mtf_list, mtf_bonus, info
 
 # ==========================================
-# 5. GRAFİK (4H - BEYAZ - TEMİZ)
+# 5. GRAFİK (BEYAZ + ENTRY/SL/TP + YÖN)
 # ==========================================
-def grafik_ciz(df, symbol, yon, skor, info=None):
+def grafik_ciz(df, symbol, yon, skor, info=None, giris=None, stop=None, hedef=None):
     with matplotlib_lock:
         try:
             if df is None or len(df) < 30:
                 return None
-            df_plot = df.copy().sort_index(ascending=True).tail(120)
+
+            df_plot = df.copy().sort_index(ascending=True).tail(100)
             if len(df_plot) < 20:
                 return None
 
-            df_plot = df_plot.rename(columns={'open':'Open','high':'High','low':'Low','close':'Close','volume':'Volume'})
+            df_plot = df_plot.rename(columns={
+                'open': 'Open', 'high': 'High', 'low': 'Low',
+                'close': 'Close', 'volume': 'Volume'
+            })
 
             ma50 = df_plot['Close'].rolling(50, min_periods=10).mean()
             ma100 = df_plot['Close'].rolling(100, min_periods=20).mean()
@@ -375,54 +388,117 @@ def grafik_ciz(df, symbol, yon, skor, info=None):
 
             addplots = []
             if ma50.notna().sum() > 8:
-                addplots.append(mpf.make_addplot(ma50, color='#1e88e5', width=1.4))
+                addplots.append(mpf.make_addplot(ma50, color='#1e88e5', width=1.5))
             if ma100.notna().sum() > 8:
-                addplots.append(mpf.make_addplot(ma100, color='#fb8c00', width=1.4))
+                addplots.append(mpf.make_addplot(ma100, color='#fb8c00', width=1.5))
             if ma200.notna().sum() > 8:
-                addplots.append(mpf.make_addplot(ma200, color='#43a047', width=1.6))
+                addplots.append(mpf.make_addplot(ma200, color='#43a047', width=1.7))
 
-            hlines = dict(hlines=[], colors=[], linestyle='--', linewidths=1.0, alpha=0.7)
+            hlines = {"hlines": [], "colors": [], "linestyle": [], "linewidths": [], "alpha": 0.9}
+
             if info and info.get("fib_levels"):
-                for p in info["fib_levels"].values():
-                    hlines["hlines"].append(p)
-                    hlines["colors"].append('#5c6bc0')
+                for price in info["fib_levels"].values():
+                    hlines["hlines"].append(price)
+                    hlines["colors"].append('#7e57c2')
+                    hlines["linestyle"].append('--')
+                    hlines["linewidths"].append(1.0)
 
-            mc = mpf.make_marketcolors(up='#26a69a', down='#ef5350', edge='inherit', wick={'up':'#26a69a','down':'#ef5350'})
+            if giris is not None:
+                hlines["hlines"].append(giris)
+                hlines["colors"].append('#2196f3')
+                hlines["linestyle"].append('-')
+                hlines["linewidths"].append(1.8)
+
+            if stop is not None:
+                hlines["hlines"].append(stop)
+                hlines["colors"].append('#f44336')
+                hlines["linestyle"].append('-')
+                hlines["linewidths"].append(1.8)
+
+            if hedef is not None:
+                hlines["hlines"].append(hedef)
+                hlines["colors"].append('#4caf50')
+                hlines["linestyle"].append('-')
+                hlines["linewidths"].append(1.8)
+
+            mc = mpf.make_marketcolors(
+                up='#26a69a', down='#ef5350',
+                edge='inherit',
+                wick={'up': '#26a69a', 'down': '#ef5350'}
+            )
             s = mpf.make_mpf_style(
-                base_mpf_style='yahoo', marketcolors=mc,
-                facecolor='white', edgecolor='#e0e0e0', figcolor='white',
-                gridcolor='#f0f0f0', y_on_right=False,
-                rc={'axes.labelcolor':'#333','xtick.color':'#555','ytick.color':'#555','axes.titlesize':11}
+                base_mpf_style='yahoo',
+                marketcolors=mc,
+                facecolor='white',
+                edgecolor='#e0e0e0',
+                figcolor='white',
+                gridcolor='#f5f5f5',
+                y_on_right=False,
+                rc={
+                    'axes.labelcolor': '#333333',
+                    'xtick.color': '#555555',
+                    'ytick.color': '#555555',
+                    'axes.titlesize': 12,
+                    'axes.titleweight': 'bold'
+                }
             )
 
-            dosya = os.path.join(ARTIFACT_DIR, f"{symbol.replace('-','_')}_chart.png")
+            dosya = os.path.join(ARTIFACT_DIR, f"{symbol.replace('-', '_')}_chart.png")
+
             fig, axes = mpf.plot(
-                df_plot, type='candle', style=s, addplot=addplots if addplots else None,
+                df_plot,
+                type='candle',
+                style=s,
+                addplot=addplots if addplots else None,
                 hlines=hlines if hlines["hlines"] else None,
-                title=f"{symbol.replace('-','/')} | {yon} | Skor: {skor:.2f}/20 | 4H",
-                returnfig=True, volume=False, figsize=(12, 6.5), tight_layout=True,
-                datetime_format='%m-%d', xrotation=0
+                title=f"{symbol.replace('-', '/')}  |  {yon}  |  Skor: {skor:.2f}/20  |  4H",
+                returnfig=True,
+                volume=False,
+                figsize=(13, 7),
+                tight_layout=True,
+                datetime_format='%d/%m %H:%M',
+                xrotation=15,
+                scale_padding={'left': 0.05, 'right': 0.28, 'top': 0.08, 'bottom': 0.15}
             )
 
             ax = axes[0]
+
             if info:
                 for z in info.get("fvg_zones", []):
-                    color = '#bbdefb90' if z["type"]=="bullish" else '#ffcdd290'
+                    color = '#bbdefb80' if z["type"] == "bullish" else '#ffcdd280'
                     ax.axhspan(z["bottom"], z["top"], facecolor=color, zorder=0)
                 for z in info.get("ob_zones", []):
-                    color = '#90caf990' if z["type"]=="bullish" else '#ef9a9a90'
-                    ax.axhspan(z["bottom"], z["top"], facecolor=color, edgecolor='#ffffff40', linewidth=0.5, zorder=1)
+                    color = '#90caf980' if z["type"] == "bullish" else '#ef9a9a80'
+                    ax.axhspan(z["bottom"], z["top"], facecolor=color, edgecolor='#ffffff40', linewidth=0.6, zorder=1)
+
+            if giris is not None:
+                ax.annotate(f'ENTRY {giris:.5f}', xy=(1.01, giris), xycoords=('axes fraction', 'data'),
+                            fontsize=9, color='#2196f3', fontweight='bold', va='center')
+            if stop is not None:
+                ax.annotate(f'SL {stop:.5f}', xy=(1.01, stop), xycoords=('axes fraction', 'data'),
+                            fontsize=9, color='#f44336', fontweight='bold', va='center')
+            if hedef is not None:
+                ax.annotate(f'TP {hedef:.5f}', xy=(1.01, hedef), xycoords=('axes fraction', 'data'),
+                            fontsize=9, color='#4caf50', fontweight='bold', va='center')
+
+            if yon == "LONG":
+                ax.annotate('▲ LONG', xy=(0.02, 0.95), xycoords='axes fraction',
+                            fontsize=14, color='#26a69a', fontweight='bold')
+            else:
+                ax.annotate('▼ SHORT', xy=(0.02, 0.95), xycoords='axes fraction',
+                            fontsize=14, color='#ef5350', fontweight='bold')
 
             fig.savefig(dosya, dpi=160, bbox_inches='tight', facecolor='white')
             plt.close(fig)
             return dosya
+
         except Exception as e:
             plt.close('all')
-            print(f"Grafik hatası: {e}")
+            print(f"Grafik çizim hatası ({symbol}): {e}")
             return None
 
 # ==========================================
-# 6. VERİTABANI + CÜZDAN + PERFORMANS
+# 6. VERİTABANI + CÜZDAN
 # ==========================================
 def db_baglanti():
     conn = sqlite3.connect(os.path.join(ARTIFACT_DIR, "islemler.db"), check_same_thread=False)
@@ -460,7 +536,7 @@ def islem_kaydet(coin, yon, giris, stop):
         conn.close()
         return
     risk = abs(giris - stop) or giris * 0.02
-    hedef = giris + risk*1.5 if yon=="LONG" else giris - risk*1.5
+    hedef = giris + risk * 1.5 if yon == "LONG" else giris - risk * 1.5
     tarih = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     c.execute("""INSERT INTO islemler 
         (coin, yon, giris_fiyati, hedef_r1, stop_loss, orjinal_stop, marjin, kaldirac, pozisyon_usd, durum, kâr_r, kâr_usd, is_be, tarih)
@@ -513,13 +589,11 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
 
         mevcut_r = (anlik - giris) / risk if yon == "LONG" else (giris - anlik) / risk
 
-        # +1R → BE
         if mevcut_r >= 1.0 and is_be == 0:
             c.execute("UPDATE islemler SET stop_loss=?, is_be=1 WHERE id=?", (giris, islem_id))
             telegram_mesaj(f"🛡 <b>STOPU GİRİŞE ÇEK (BE)</b>\n\n📌 <b>{coin} ({yon})</b>\n📈 +1R kâra ulaşıldı!\n🎯 Yeni Stop: {giris:.6f}")
             is_be = 1
 
-        # Kapanış
         if yon == "LONG":
             if anlik >= hedef:
                 pnl_usd = poz_usd * 0.03
@@ -553,7 +627,7 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
     conn.close()
 
 # ==========================================
-# 8. PERFORMANS TABLOSU OLUŞTURMA
+# 8. PERFORMANS TABLOSU
 # ==========================================
 def performans_tablosu_olustur():
     conn, c = db_baglanti()
@@ -567,7 +641,7 @@ def performans_tablosu_olustur():
     stats = {}
     for coin, durum, r in rows:
         if coin not in stats:
-            stats[coin] = {"WIN":0, "LOSS":0, "BE":0, "toplam_r":0.0, "islem":0}
+            stats[coin] = {"WIN": 0, "LOSS": 0, "BE": 0, "toplam_r": 0.0, "islem": 0}
         stats[coin]["islem"] += 1
         if durum == "WIN":
             stats[coin]["WIN"] += 1
@@ -592,7 +666,7 @@ def performans_tablosu_olustur():
         else:
             deger = "Normal"
         data.append({
-            "Coin": coin.replace("-USDT",""),
+            "Coin": coin.replace("-USDT", ""),
             "İşlem": s["islem"],
             "WIN": s["WIN"],
             "LOSS": s["LOSS"],
@@ -603,19 +677,12 @@ def performans_tablosu_olustur():
             "Değerlendirme": deger
         })
 
-    df = pd.DataFrame(data)
-    df = df.sort_values("Ort R", ascending=False)
+    df = pd.DataFrame(data).sort_values("Ort R", ascending=False)
 
-    # Görsel tablo
-    fig, ax = plt.subplots(figsize=(14, max(6, len(df)*0.35)))
+    fig, ax = plt.subplots(figsize=(14, max(6, len(df) * 0.35)))
     ax.axis('off')
-    tbl = ax.table(
-        cellText=df.values,
-        colLabels=df.columns,
-        cellLoc='center',
-        loc='center',
-        colColours=['#1565c0']*len(df.columns)
-    )
+    tbl = ax.table(cellText=df.values, colLabels=df.columns, cellLoc='center', loc='center',
+                   colColours=['#1565c0'] * len(df.columns))
     tbl.auto_set_font_size(False)
     tbl.set_fontsize(8)
     tbl.scale(1.2, 1.4)
@@ -639,7 +706,6 @@ def performans_tablosu_olustur():
     plt.savefig(dosya, dpi=140, bbox_inches='tight', facecolor='white')
     plt.close()
 
-    # Özet
     toplam_islem = len(rows)
     toplam_win = sum(1 for _, d, _ in rows if d == "WIN")
     toplam_loss = sum(1 for _, d, _ in rows if d == "LOSS")
@@ -670,23 +736,22 @@ def saatlik_rapor_gonder(guncel_fiyatlar: dict):
     detay = ""
     for coin, yon, giris, poz in aciklar:
         anlik = guncel_fiyatlar.get(coin, giris)
-        pnl = poz * ((anlik-giris)/giris) if yon=="LONG" else poz * ((giris-anlik)/giris)
+        pnl = poz * ((anlik - giris) / giris) if yon == "LONG" else poz * ((giris - anlik) / giris)
         unrealized += pnl
-        yuzde = ((anlik-giris)/giris*100) if yon=="LONG" else ((giris-anlik)/giris*100)
-        detay += f"• <b>{coin}</b> ({yon}): ${pnl:+.2f} (%{yuzde*5:+.1f})\n"
+        yuzde = ((anlik - giris) / giris * 100) if yon == "LONG" else ((giris - anlik) / giris * 100)
+        detay += f"• <b>{coin}</b> ({yon}): ${pnl:+.2f} (%{yuzde * 5:+.1f})\n"
 
     rapor = f"""📊 <b>SAATLİK CÜZDAN RAPORU</b>
 ────────────────────
 💵 Kullanılabilir: ${bakiye:.2f}
 📈 Açık PnL: ${unrealized:+.2f}
-💎 Toplam Varlık: ${bakiye+unrealized:.2f}
+💎 Toplam Varlık: ${bakiye + unrealized:.2f}
 
 🔓 Açık Pozisyonlar ({len(aciklar)}):
 {detay if detay else "• Yok"}
 ────────────────────"""
     telegram_mesaj(rapor)
 
-    # Performans tablosu
     tablo_path, ozet = performans_tablosu_olustur()
     if ozet:
         telegram_mesaj(ozet)
@@ -700,10 +765,11 @@ def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus
     atr = ta.atr(df["high"], df["low"], df["close"], 14).iloc[-1]
     if pd.isna(atr) or atr <= 0:
         atr = fiyat * 0.02
-    stop = fiyat - atr*1.5 if yon=="LONG" else fiyat + atr*1.5
-    hedef = fiyat + (fiyat-stop)*1.5 if yon=="LONG" else fiyat - (stop-fiyat)*1.5
 
-    mesaj = f"🧠 <b>{symbol.replace('-','/')} – {yon} (5x Izole)</b>\n"
+    stop = fiyat - (atr * 1.5) if yon == "LONG" else fiyat + (atr * 1.5)
+    hedef = fiyat + (fiyat - stop) * 1.5 if yon == "LONG" else fiyat - (stop - fiyat) * 1.5
+
+    mesaj = f"🧠 <b>{symbol.replace('-', '/')} – {yon} (5x Izole)</b>\n"
     mesaj += f"⭐ Skor: {skor:.2f}/20\n"
     if mtf_bonus > 0:
         mesaj += f"⏱ MTF bonus: +{mtf_bonus:.2f}/2\n"
@@ -716,9 +782,9 @@ def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus
         mesaj += f"{m}\n"
     mesaj += f"\n────────────────────\n💰 <b>GİRİŞ:</b> {fiyat:.6f}\n🛡 <b>SL:</b> {stop:.6f}\n🎯 <b>TP (1.5R):</b> {hedef:.6f}\n\n⚠️ Sanal işlem – yatırım tavsiyesi değildir."
 
-    foto = grafik_ciz(df, symbol, yon, skor, info)
+    foto = grafik_ciz(df, symbol, yon, skor, info, giris=fiyat, stop=stop, hedef=hedef)
     if foto:
-        telegram_foto(foto, f"🧠 {symbol.replace('-','/')} | {yon} | Skor: {skor:.2f}")
+        telegram_foto(foto, f"🧠 {symbol.replace('-', '/')} | {yon} | Skor: {skor:.2f}")
     telegram_mesaj(mesaj)
     islem_kaydet(symbol, yon, fiyat, stop)
 
