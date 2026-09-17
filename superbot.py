@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Sanal İşlem Botu v12.5 - DÜZELTİLMİŞ VERSİYON
+Sanal İşlem Botu v12.5 - TAM DÜZELTİLMİŞ VERSİYON
 Düzeltmeler:
-- Fibonacci tamamen yeniden yazıldı (dinamik swing + gerçek zone tespiti)
-- Excel kayıt sistemi eklendi (işlemler + cüzdan + performans)
-- Cüzdan özeti ve saatlik rapor güçlendirildi
-- Aynı coin'e sürekli sinyal basma engellendi (cooldown)
-- Skor varyasyonu artırıldı
+- Aynı coin'e tekrar eden sinyal gönderimi engellendi (Açık pozisyon + Cooldown kilidi)
+- Telegram bildirimi gönderilmeden önce veritabanı kaydı zorunlu kılındı
+- Fibonacci dinamik swing tespiti güncellendi
+- Excel kayıt sistemi ve otomatik veritabanı senkronizasyonu
 """
 
 import os
@@ -124,7 +123,7 @@ def veri_cek(symbol: str, bar: str = "4H", limit: int = 250):
         return None
 
 # ==========================================
-# 4. ANALİZ  (FIBONACCI DÜZELTİLDİ)
+# 4. ANALİZ
 # ==========================================
 def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
     if df is None or len(df) < 60:
@@ -152,11 +151,9 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
 
     swing_highs, swing_lows = find_significant_swings(df["high"], df["low"], order=5, lookback=80)
 
-    # En son anlamlı swing'leri al
     last_swing_high = swing_highs[-1][1] if swing_highs else safe_max(df["high"].iloc[-60:])
     last_swing_low  = swing_lows[-1][1]  if swing_lows  else safe_min(df["low"].iloc[-60:])
 
-    # Eğer swing aralığı çok darsa daha geniş bak
     if abs(last_swing_high - last_swing_low) < df["close"].iloc[-1] * 0.012:
         last_swing_high = safe_max(df["high"].iloc[-80:])
         last_swing_low  = safe_min(df["low"].iloc[-80:])
@@ -210,9 +207,7 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
             equal_low = True
             break
 
-    # =====================================================
-    # FİBONACCI - YENİDEN YAZILDI (DİNAMİK + ANLAMLI)
-    # =====================================================
+    # Fibonacci
     fib_range = last_swing_high - last_swing_low
     fib_levels = {}
     fib_zone = "Neutral"
@@ -220,8 +215,7 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
     fib_score_s = 0.60
     fib_text = "Neutral"
 
-    if fib_range > fiyat * 0.008:  # Anlamlı bir swing aralığı varsa
-        # Klasik retracement seviyeleri (yukarıdan aşağıya)
+    if fib_range > fiyat * 0.008:
         fib_levels = {
             0.236: last_swing_high - fib_range * 0.236,
             0.382: last_swing_high - fib_range * 0.382,
@@ -231,7 +225,6 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
             0.886: last_swing_high - fib_range * 0.886,
         }
 
-        # Fiyat hangi seviyeye yakın?
         nearest_level = None
         nearest_dist = float("inf")
         for ratio, lvl in fib_levels.items():
@@ -240,19 +233,15 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
                 nearest_dist = dist
                 nearest_level = ratio
 
-        # Tolerans: ATR'nin 1.15 katı
         near_threshold = atr_val * 1.15
 
         if nearest_level is not None and nearest_dist < near_threshold:
-            # Fiyat Fib seviyesine yakın
             if nearest_level in (0.618, 0.786, 0.886):
-                # Derin retracement → genellikle bullish bounce beklenir
                 fib_zone = "Bullish"
                 fib_score_l = 1.25
                 fib_score_s = 0.40
                 fib_text = f"Bullish Fib zone near {nearest_level:.3f}"
             elif nearest_level in (0.236, 0.382):
-                # Sığ retracement → trend devamı veya rejection
                 if fiyat > (last_swing_high + last_swing_low) / 2:
                     fib_zone = "Bearish"
                     fib_score_l = 0.40
@@ -263,20 +252,19 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
                     fib_score_l = 1.05
                     fib_score_s = 0.50
                     fib_text = f"Bullish Fib zone near {nearest_level:.3f}"
-            else:  # 0.500
+            else:
                 fib_zone = "Neutral"
                 fib_score_l = 0.85
                 fib_score_s = 0.85
                 fib_text = f"Neutral Fib zone near 0.500"
         else:
-            # Seviyeye yakın değil → fiyatın swing içindeki konumuna bak
             pct = (last_swing_high - fiyat) / fib_range if fib_range > 0 else 0.5
-            if pct >= 0.70:          # Fiyat dip bölgesinde
+            if pct >= 0.70:
                 fib_zone = "Bullish"
                 fib_score_l = 1.10
                 fib_score_s = 0.45
                 fib_text = "Bullish (deep in swing range)"
-            elif pct <= 0.30:        # Fiyat tepe bölgesinde
+            elif pct <= 0.30:
                 fib_zone = "Bearish"
                 fib_score_l = 0.45
                 fib_score_s = 1.10
@@ -357,7 +345,6 @@ def skor_hesapla(info: dict):
         skor_s += 1.12 + 1.12
         krit_s += ["Breaker Block: 1.12 - Bearish breaker", "PO3: 1.12 - Bearish AMD/PO3 proxy"]
 
-    # Fibonacci (yeni text)
     skor_l += info.get("fib_score_l", 0.60)
     skor_s += info.get("fib_score_s", 0.60)
     fib_text = info.get("fib_text", "Neutral")
@@ -454,7 +441,6 @@ def analiz_yap(symbol: str):
     mtf_bonus = bonus_l if yon == "LONG" else bonus_s
     skor += mtf_bonus
     return skor, kriterler, info["fiyat"], df, yon, mtf_list, mtf_bonus, info
-
 
 # ==========================================
 # 5. GRAFİK
@@ -560,7 +546,6 @@ def grafik_ciz(df, symbol, yon, skor, info=None, giris=None, stop=None, hedef=No
             print(f"Grafik hatası ({symbol}): {e}")
             return None
 
-
 # ==========================================
 # 6. VERİTABANI + EXCEL
 # ==========================================
@@ -590,32 +575,28 @@ def db_kurulum():
     conn.commit()
     conn.close()
 
+def acik_pozisyon_var_mi(coin):
+    """Veritabanında açık pozisyon olup olmadığını kontrol eder."""
+    conn, c = db_baglanti()
+    c.execute("SELECT id FROM islemler WHERE coin=? AND durum='ACIK'", (coin,))
+    row = c.fetchone()
+    conn.close()
+    return row is not None
 
 def excel_kaydet():
-    """Tüm işlemleri + cüzdan özetini Excel'e yazar"""
     try:
         conn, c = db_baglanti()
-
-        # İşlemler
         df_islem = pd.read_sql_query("SELECT * FROM islemler ORDER BY id DESC", conn)
-
-        # Cüzdan
         c.execute("SELECT bakiye, guncelleme FROM cuzdan ORDER BY id DESC LIMIT 1")
         row = c.fetchone()
         bakiye = row[0] if row else ILK_BAKIYE
-
-        # Açık pozisyonlar
         df_acik = pd.read_sql_query("SELECT * FROM islemler WHERE durum='ACIK'", conn)
-
-        # Kapanmış
         df_kapali = pd.read_sql_query("SELECT * FROM islemler WHERE durum != 'ACIK'", conn)
-
         conn.close()
 
         excel_path = os.path.join(ARTIFACT_DIR, "bot_kayitlari.xlsx")
 
         with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
-            # Özet sayfa
             ozet_data = {
                 "Metrik": ["Bakiye (USD)", "Açık Pozisyon Sayısı", "Toplam Kapanmış İşlem", 
                            "WIN", "LOSS", "BE", "Son Güncelleme"],
@@ -644,7 +625,6 @@ def excel_kaydet():
         print(f"Excel kayıt hatası: {e}")
         return None
 
-
 def bakiye_guncelle(pnl_usd: float):
     conn, c = db_baglanti()
     c.execute("SELECT bakiye FROM cuzdan ORDER BY id DESC LIMIT 1")
@@ -655,21 +635,18 @@ def bakiye_guncelle(pnl_usd: float):
               (yeni, datetime.now().isoformat()))
     conn.commit()
     conn.close()
-    # Her bakiye güncellemesinde Excel'i de güncelle
     excel_kaydet()
     return yeni
 
-
 def islem_kaydet(coin, yon, giris, stop, skor=0.0):
-    conn, c = db_baglanti()
-    c.execute("SELECT id FROM islemler WHERE coin=? AND durum='ACIK'", (coin,))
-    if c.fetchone():
-        conn.close()
-        return False  # Zaten açık pozisyon var
+    if acik_pozisyon_var_mi(coin):
+        return False
 
     risk = abs(giris - stop) or giris * 0.02
     hedef = giris + risk*1.5 if yon=="LONG" else giris - risk*1.5
     tarih = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    conn, c = db_baglanti()
     c.execute("""INSERT INTO islemler 
         (coin, yon, giris_fiyati, hedef_r1, stop_loss, orjinal_stop, marjin, kaldirac, pozisyon_usd, durum, kâr_r, kâr_usd, is_be, tarih, skor)
         VALUES (?,?,?,?,?,?,?,?,?,'ACIK',0,0,0,?,?)""",
@@ -679,7 +656,6 @@ def islem_kaydet(coin, yon, giris, stop, skor=0.0):
     excel_kaydet()
     return True
 
-
 def telegram_mesaj(text):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
@@ -687,7 +663,6 @@ def telegram_mesaj(text):
                       data={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=10)
     except Exception as e:
         print(f"Mesaj hatası: {e}")
-
 
 def telegram_foto(path, caption=""):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID or not path or not os.path.exists(path):
@@ -699,7 +674,6 @@ def telegram_foto(path, caption=""):
                           files={"photo": f}, data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "HTML"}, timeout=30)
     except Exception as e:
         print(f"Foto hatası: {e}")
-
 
 # ==========================================
 # 7. AÇIK İŞLEM KONTROL
@@ -756,7 +730,6 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
     conn.commit()
     conn.close()
     excel_kaydet()
-
 
 # ==========================================
 # 8. PERFORMANS + RAPOR
@@ -831,7 +804,6 @@ Toplam R: {toplam_r:.2f}
 ────────────────────"""
     return dosya, ozet
 
-
 def saatlik_rapor_gonder(guncel_fiyatlar: dict):
     conn, c = db_baglanti()
     c.execute("SELECT bakiye FROM cuzdan ORDER BY id DESC LIMIT 1")
@@ -863,23 +835,26 @@ def saatlik_rapor_gonder(guncel_fiyatlar: dict):
 📁 Excel kayıtları güncellendi."""
     telegram_mesaj(rapor)
 
-    # Excel'i de güncelle
-    excel_path = excel_kaydet()
-
+    excel_kaydet()
     tablo_path, ozet = performans_tablosu_olustur()
     if ozet: telegram_mesaj(ozet)
     if tablo_path: telegram_foto(tablo_path, "📋 Coin Performans Tablosu")
 
-
 # ==========================================
-# 9. SİNYAL GÖNDER (Cooldown eklendi)
+# 9. SİNYAL GÖNDER (Sıralama ve kilitler düzeltildi)
 # ==========================================
 def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus, info=None):
-    # Cooldown kontrolü
     now = datetime.now()
+
+    # 1. Kontrol: Bu coin'de açık pozisyon var mı?
+    if acik_pozisyon_var_mi(symbol):
+        print(f"Atlandı: {symbol} için zaten açık pozisyon bulunuyor.")
+        return
+
+    # 2. Kontrol: Cooldown süresi doldu mu?
     last = last_signal_time.get(symbol)
     if last and (now - last) < timedelta(minutes=SIGNAL_COOLDOWN_MINUTES):
-        print(f"Cooldown: {symbol} - son sinyal { (now-last).seconds // 60 } dk önce")
+        print(f"Cooldown: {symbol} - son sinyal {(now-last).seconds // 60} dk önce atıldı.")
         return
 
     atr = ta.atr(df["high"], df["low"], df["close"], 14).iloc[-1]
@@ -887,6 +862,15 @@ def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus
     stop = fiyat - atr*1.5 if yon=="LONG" else fiyat + atr*1.5
     hedef = fiyat + (fiyat-stop)*1.5 if yon=="LONG" else fiyat - (stop-fiyat)*1.5
 
+    # 3. Veritabanına Kaydet (Eğer pozisyon kaydedilemezse iptal et)
+    kaydedildi = islem_kaydet(symbol, yon, fiyat, stop, skor)
+    if not kaydedildi:
+        return
+
+    # 4. Cooldown süresini hafızada kilitle
+    last_signal_time[symbol] = now
+
+    # 5. Telegram Bildirimini Gönder
     mesaj = f"🧠 <b>{symbol.replace('-','/')} – {yon} (5x Izole)</b>\n"
     mesaj += f"⭐ Skor: {skor:.2f}/20\n"
     if mtf_bonus > 0: mesaj += f"⏱ MTF bonus: +{mtf_bonus:.2f}/2\n"
@@ -900,11 +884,6 @@ def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus
     foto = grafik_ciz(df, symbol, yon, skor, info, giris=fiyat, stop=stop, hedef=hedef)
     if foto: telegram_foto(foto, f"🧠 {symbol.replace('-','/')} | {yon} | Skor: {skor:.2f}")
     telegram_mesaj(mesaj)
-
-    kaydedildi = islem_kaydet(symbol, yon, fiyat, stop, skor)
-    if kaydedildi:
-        last_signal_time[symbol] = now
-
 
 # ==========================================
 # 10. ANA DÖNGÜ
