@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Sanal İşlem Botu v13.2 (Optimize Edilmiş Sürüm)
+Sanal İşlem Botu v13.2 (Telegram Çalışır Sürüm)
 - Keltner kaldırıldı
 - Skor 14.0+
 - Hacim %85 (MA20)
-- RR 1:2 (Sabitlendi)
+- RR 1:2 (Sabit)
 - ADX > 22 + EMA21 trend filtresi
 - Temizlenmiş geniş vadeli coin listesi
 """
 
 import os
 import time
-import sqlite3
 import threading
 from datetime import datetime, timedelta
 
@@ -28,7 +27,7 @@ import matplotlib.pyplot as plt
 from flask import Flask
 
 # ==========================================
-# 1. FLASK (Render / Uptime için)
+# 1. FLASK (Uptime için)
 # ==========================================
 app = Flask(__name__)
 
@@ -38,7 +37,7 @@ def health_check():
 
 def run_flask():
     port = int(os.environ.get("PORT", 10003))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, threaded=True)
 
 # ==========================================
 # 2. AYARLAR
@@ -59,7 +58,6 @@ POZISYON_USD = MARJIN_USD * KALDIRAC
 
 SIGNAL_COOLDOWN_MINUTES = 45
 
-# Skor & Filtreler
 MIN_SKOR = 14.0
 VOLUME_MA_LENGTH = 20
 VOLUME_MIN_RATIO = 0.85
@@ -74,10 +72,9 @@ matplotlib_lock = threading.Lock()
 last_signal_time = {}
 
 # ==========================================
-# GENİŞ VADELİ COİN LİSTESİ (OKX USDT-M) - Tekrarlar Temizlendi
+# GENİŞ VADELİ COİN LİSTESİ
 # ==========================================
 HEDEF_COINLER = [
-    # Major
     "BTC-USDT", "ETH-USDT", "BNB-USDT", "SOL-USDT", "XRP-USDT", "DOGE-USDT",
     "ADA-USDT", "AVAX-USDT", "DOT-USDT", "LINK-USDT", "LTC-USDT", "BCH-USDT",
     "ATOM-USDT", "NEAR-USDT", "APT-USDT", "SUI-USDT", "SEI-USDT", "TIA-USDT",
@@ -87,12 +84,10 @@ HEDEF_COINLER = [
     "RUNE-USDT", "KAS-USDT", "TAO-USDT", "JUP-USDT", "W-USDT", "ENA-USDT",
     "ETHFI-USDT", "PENDLE-USDT", "EIGEN-USDT", "ZK-USDT", "ZRO-USDT", "BLAST-USDT",
     "NOT-USDT", "DOGS-USDT", "CATI-USDT", "HMSTR-USDT",
-    # DeFi & Layer
     "AAVE-USDT", "UNI-USDT", "MKR-USDT", "COMP-USDT", "SNX-USDT", "CRV-USDT",
     "LDO-USDT", "RPL-USDT", "ENS-USDT", "DYDX-USDT", "GMX-USDT", "GNS-USDT",
     "RDNT-USDT", "MAGIC-USDT", "HOOK-USDT", "SSV-USDT", "ALT-USDT", "PORTAL-USDT",
     "XAI-USDT", "MANTA-USDT", "METIS-USDT", "STRK-USDT", "PIXEL-USDT",
-    # Diğer popüler
     "TRX-USDT", "TON-USDT", "ICP-USDT", "HBAR-USDT", "VET-USDT", "ALGO-USDT",
     "EGLD-USDT", "THETA-USDT", "FTM-USDT", "ONE-USDT", "ZIL-USDT", "IOTA-USDT",
     "QTUM-USDT", "ZETA-USDT", "AEVO-USDT", "REZ-USDT", "BB-USDT", "OMNI-USDT",
@@ -172,7 +167,7 @@ def hacim_yeterli_mi(df: pd.DataFrame):
         return False, 0.0, 0.0
 
 # ==========================================
-# ANALİZ (SMC & İndikatörler)
+# ANALİZ
 # ==========================================
 def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
     if df is None or len(df) < 60:
@@ -185,7 +180,6 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
     df["MA200"] = ta.sma(df["close"], length=200)
     df["ATR"] = ta.atr(df["high"], df["low"], df["close"], length=14)
 
-    # ADX
     adx_df = ta.adx(df["high"], df["low"], df["close"], length=ADX_LENGTH)
     adx_val = 0.0
     if adx_df is not None and not adx_df.empty:
@@ -193,7 +187,6 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
         if col in adx_df.columns:
             adx_val = float(adx_df[col].iloc[-1])
 
-    # EMA21 Trend Filtresi
     ema21 = ta.ema(df["close"], length=EMA_TREND_LENGTH)
     fiyat = float(df["close"].iloc[-1])
     ema21_val = float(ema21.iloc[-1]) if ema21 is not None else fiyat
@@ -261,6 +254,28 @@ def analiz_yap(symbol: str):
     skor += mtf_bonus
     return skor, kriterler, info["fiyat"], df, yon, mtf_list, mtf_bonus, info
 
+def telegram_mesaj_gonder(text: str):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram token veya chat_id eksik!")
+        return False
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+        }
+        r = requests.post(url, json=payload, timeout=15)
+        if r.status_code == 200:
+            return True
+        else:
+            print(f"Telegram hata: {r.status_code} - {r.text}")
+            return False
+    except Exception as e:
+        print(f"Telegram gönderme hatası: {e}")
+        return False
+
 def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus, info=None):
     now = datetime.now()
     last = last_signal_time.get(symbol)
@@ -280,26 +295,69 @@ def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus
             return
 
     atr = info.get("atr", fiyat * 0.02) if info else fiyat * 0.02
-    stop = fiyat - atr * 1.5 if yon == "LONG" else fiyat + atr * 1.5
-    hedef = fiyat + (fiyat - stop) * 2.0 if yon == "LONG" else fiyat - (stop - fiyat) * 2.0
+    if yon == "LONG":
+        stop = fiyat - atr * 1.5
+        hedef = fiyat + (fiyat - stop) * 2.0
+    else:
+        stop = fiyat + atr * 1.5
+        hedef = fiyat - (stop - fiyat) * 2.0
 
-    last_signal_time[symbol] = now
-    print(f"🚀 SİNYAL: {symbol} | {yon} | Fiyat: {fiyat} | SL: {stop} | TP: {hedef}")
+    # Risk/Reward
+    risk = abs(fiyat - stop)
+    reward = abs(hedef - fiyat)
+    rr = reward / risk if risk > 0 else 0
+
+    kriter_text = "\n".join([f"• {k}" for k in kriterler])
+    mtf_text = "\n".join(mtf_list)
+
+    emoji = "🟢" if yon == "LONG" else "🔴"
+    yon_tr = "LONG" if yon == "LONG" else "SHORT"
+
+    mesaj = f"""
+{emoji} <b>SİNYAL: {symbol}</b> {emoji}
+
+<b>Yön:</b> {yon_tr}
+<b>Skor:</b> {skor:.1f}
+<b>Fiyat:</b> {fiyat:.6f}
+<b>Stop Loss:</b> {stop:.6f}
+<b>Take Profit:</b> {hedef:.6f}
+<b>R:R</b> ≈ 1:{rr:.1f}
+
+<b>Kriterler:</b>
+{kriter_text}
+
+<b>MTF:</b>
+{mtf_text}
+
+⏰ {now.strftime('%d.%m.%Y %H:%M:%S')}
+"""
+
+    if telegram_mesaj_gonder(mesaj.strip()):
+        last_signal_time[symbol] = now
+        print(f"🚀 Telegram'a gönderildi: {symbol} | {yon} | Skor: {skor:.1f}")
+    else:
+        print(f"❌ Telegram gönderilemedi: {symbol}")
 
 def tam_tarama():
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Kripto Vadeli İşlem Taraması Başlıyor...")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Kripto Vadeli İşlem Taraması Başlıyor... ({len(HEDEF_COINLER)} coin)")
     for coin in HEDEF_COINLER:
         try:
             skor, krit, fiyat, df, yon, mtf, bonus, info = analiz_yap(coin)
             if skor >= MIN_SKOR and df is not None and yon in ["LONG", "SHORT"]:
                 telegram_gonder(coin, skor, krit, fiyat, df, yon, mtf, bonus, info)
-            time.sleep(0.1)
+            time.sleep(0.15)
         except Exception as e:
             print(f"Hata {coin}: {e}")
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Tarama Tamamlandı.")
 
 if __name__ == "__main__":
     print(f"Sanal İşlem Botu Başlatıldı. {len(HEDEF_COINLER)} adet coin taranıyor...")
+    print(f"Telegram Token: {'✓' if TELEGRAM_TOKEN else '✗'}")
+    print(f"Chat ID: {'✓' if TELEGRAM_CHAT_ID else '✗'}")
+
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("UYARI: Telegram bilgileri eksik! Sinyaller sadece konsola yazılacak.")
+
     if RUN_ONCE:
         tam_tarama()
     else:
