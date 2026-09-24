@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Sanal İşlem Botu v13.3
+Sanal İşlem Botu v13.4
+- Sadece 3 coin: BTC-USDT, XAU-USDT-SWAP, XAG-USDT-SWAP
 - Skor 15.0 (yüksek kalite)
 - Hacim %60 (gevşetildi)
 - ADX > 16
 - EMA21 engeli kaldırıldı
 - RR 1:2
 - Keltner yok
+- Grafik: EMA21, MA50, Fib, RSI, Volume+MA14, MACD, StochRSI+MA, KDJ
 """
 
 import os
@@ -35,7 +37,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def health_check():
-    return "OK - Sanal İşlem Botu v13.3 Aktif", 200
+    return "OK - Sanal İşlem Botu v13.4 Aktif", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10003))
@@ -75,30 +77,13 @@ matplotlib_lock = threading.Lock()
 last_signal_time = {}
 
 # ==========================================
-# COİN LİSTESİ
+# COİN LİSTESİ (sadece 3)
 # ==========================================
 HEDEF_COINLER = [
-    "BTC-USDT", "ETH-USDT", "BNB-USDT", "SOL-USDT", "XRP-USDT", "DOGE-USDT",
-    "ADA-USDT", "AVAX-USDT", "DOT-USDT", "LINK-USDT", "LTC-USDT", "BCH-USDT",
-    "ATOM-USDT", "NEAR-USDT", "APT-USDT", "SUI-USDT", "SEI-USDT", "TIA-USDT",
-    "INJ-USDT", "OP-USDT", "ARB-USDT", "SAND-USDT", "MANA-USDT", "GALA-USDT",
-    "AXS-USDT", "IMX-USDT", "RNDR-USDT", "FET-USDT", "WIF-USDT", "PEPE-USDT",
-    "BONK-USDT", "FLOKI-USDT", "SHIB-USDT", "ORDI-USDT", "STX-USDT", "RUNE-USDT",
-    "KAS-USDT", "TAO-USDT", "JUP-USDT", "ENA-USDT", "ETHFI-USDT", "PENDLE-USDT",
-    "EIGEN-USDT", "ZK-USDT", "ZRO-USDT", "NOT-USDT", "DOGS-USDT", "HMSTR-USDT",
-    "AAVE-USDT", "UNI-USDT", "MKR-USDT", "COMP-USDT", "SNX-USDT", "CRV-USDT",
-    "LDO-USDT", "ENS-USDT", "DYDX-USDT", "GMX-USDT", "SSV-USDT", "ALT-USDT",
-    "STRK-USDT", "MANTA-USDT", "PIXEL-USDT", "XAI-USDT", "TRX-USDT", "TON-USDT",
-    "ICP-USDT", "HBAR-USDT", "VET-USDT", "ALGO-USDT", "EGLD-USDT", "THETA-USDT",
-    "ONE-USDT", "ZIL-USDT", "IOTA-USDT", "QTUM-USDT", "ZETA-USDT", "AEVO-USDT",
-    "BB-USDT", "MEW-USDT", "POPCAT-USDT", "PNUT-USDT", "GOAT-USDT", "ACT-USDT",
-    "PENGU-USDT", "VIRTUAL-USDT", "AIXBT-USDT", "GRASS-USDT", "SPX-USDT",
-    "BOME-USDT", "ONDO-USDT", "PYTH-USDT", "WLD-USDT", "ARKM-USDT", "BLUR-USDT",
-    "CYBER-USDT", "AR-USDT", "KSM-USDT", "MINA-USDT", "CELO-USDT", "ROSE-USDT",
-    "CFX-USDT", "ACH-USDT", "TRB-USDT", "STORJ-USDT", "ANKR-USDT", "API3-USDT",
-    "LPT-USDT", "MASK-USDT", "YGG-USDT", "BIGTIME-USDT", "SUSHI-USDT", "1INCH-USDT"
+    "BTC-USDT",
+    "XAU-USDT-SWAP",   # Altın (Gold)
+    "XAG-USDT-SWAP",   # Gümüş (Silver)
 ]
-HEDEF_COINLER = sorted(list(set(HEDEF_COINLER)))
 
 # ==========================================
 # YARDIMCI FONKSİYONLAR
@@ -419,35 +404,181 @@ def telegram_foto(path, caption=""):
         print(f"Foto hatası: {e}")
 
 # ==========================================
-# GRAFİK
+# GRAFİK (EMA, RSI, VM14, MACD, StochRSI, MAStochRSI, KDJ, Fibonacci)
 # ==========================================
 def grafik_ciz(df, symbol, yon, skor, info=None, giris=None, stop=None, hedef=None):
     with matplotlib_lock:
         try:
-            if df is None or len(df) < 30:
+            if df is None or len(df) < 50:
                 return None
-            df_plot = df.copy().sort_index(ascending=True).tail(100)
-            df_plot = df_plot.rename(columns={'open':'Open','high':'High','low':'Low','close':'Close','volume':'Volume'})
-            ma50 = df_plot['Close'].rolling(50, min_periods=10).mean()
+
+            df_plot = df.copy().sort_index(ascending=True).tail(120)
+            df_plot = df_plot.rename(columns={
+                'open': 'Open', 'high': 'High', 'low': 'Low',
+                'close': 'Close', 'volume': 'Volume'
+            })
+
+            # --- İndikatörler ---
+            close = df_plot['Close']
+            high = df_plot['High']
+            low = df_plot['Low']
+            volume = df_plot['Volume']
+
+            # EMA21 + MA50
+            ema21 = ta.ema(close, length=21)
+            ma50 = ta.sma(close, length=50)
+
+            # Volume MA14 (VM14)
+            vol_ma14 = volume.rolling(14).mean()
+
+            # RSI
+            rsi = ta.rsi(close, length=14)
+
+            # MACD
+            macd_df = ta.macd(close, fast=12, slow=26, signal=9)
+            macd_line = macd_df.iloc[:, 0] if macd_df is not None else None
+            macd_hist = macd_df.iloc[:, 1] if macd_df is not None else None
+            macd_signal = macd_df.iloc[:, 2] if macd_df is not None else None
+
+            # StochRSI + MA of StochRSI
+            stochrsi_df = ta.stochrsi(close, length=14, rsi_length=14, k=3, d=3)
+            stochrsi_k = stochrsi_df.iloc[:, 0] if stochrsi_df is not None else None
+            stochrsi_d = stochrsi_df.iloc[:, 1] if stochrsi_df is not None else None
+            stochrsi_ma = stochrsi_k.rolling(5).mean() if stochrsi_k is not None else None
+
+            # KDJ (K, D, J)
+            kdj = ta.kdj(high, low, close, length=9, signal=3)
+            kdj_k = kdj.iloc[:, 0] if kdj is not None else None
+            kdj_d = kdj.iloc[:, 1] if kdj is not None else None
+            kdj_j = kdj.iloc[:, 2] if kdj is not None else None
+
+            # Fibonacci seviyeleri (info'dan)
+            fib_levels = (info or {}).get("fib_levels") or {}
+
+            # --- addplot listesi ---
             addplots = []
-            if ma50.notna().sum() > 8:
-                addplots.append(mpf.make_addplot(ma50, color='#1e88e5', width=1.5))
-            hlines = {"hlines": [], "colors": [], "linestyle": [], "linewidths": [], "alpha": 0.9}
-            if giris: hlines["hlines"].append(giris); hlines["colors"].append('#2196f3'); hlines["linestyle"].append('-'); hlines["linewidths"].append(1.8)
-            if stop: hlines["hlines"].append(stop); hlines["colors"].append('#f44336'); hlines["linestyle"].append('-'); hlines["linewidths"].append(1.8)
-            if hedef: hlines["hlines"].append(hedef); hlines["colors"].append('#4caf50'); hlines["linestyle"].append('-'); hlines["linewidths"].append(1.8)
-            mc = mpf.make_marketcolors(up='#26a69a', down='#ef5350', edge='inherit', wick={'up':'#26a69a','down':'#ef5350'})
-            s = mpf.make_mpf_style(base_mpf_style='yahoo', marketcolors=mc, facecolor='white')
-            dosya = os.path.join(ARTIFACT_DIR, f"{symbol.replace('-','_')}_chart.png")
-            fig, axes = mpf.plot(df_plot, type='candle', style=s, addplot=addplots if addplots else None,
-                                 hlines=hlines if hlines["hlines"] else None,
-                                 title=f"{symbol} | {yon} | Skor: {skor:.2f}", returnfig=True, volume=False, figsize=(12,6))
+
+            # Panel 0 (fiyat): EMA21, MA50
+            if ema21 is not None and ema21.notna().sum() > 5:
+                addplots.append(mpf.make_addplot(ema21, color='#ff9800', width=1.3, panel=0))
+            if ma50 is not None and ma50.notna().sum() > 5:
+                addplots.append(mpf.make_addplot(ma50, color='#1e88e5', width=1.5, panel=0))
+
+            # Panel 1: Volume + VM14
+            addplots.append(mpf.make_addplot(volume, type='bar', color='#90caf9', panel=1, ylabel='Vol'))
+            if vol_ma14 is not None and vol_ma14.notna().sum() > 3:
+                addplots.append(mpf.make_addplot(vol_ma14, color='#e91e63', width=1.2, panel=1))
+
+            # Panel 2: RSI
+            if rsi is not None and rsi.notna().sum() > 5:
+                addplots.append(mpf.make_addplot(rsi, color='#9c27b0', width=1.2, panel=2, ylabel='RSI'))
+                addplots.append(mpf.make_addplot(pd.Series(70, index=df_plot.index), color='red', width=0.7, linestyle='--', panel=2))
+                addplots.append(mpf.make_addplot(pd.Series(30, index=df_plot.index), color='green', width=0.7, linestyle='--', panel=2))
+
+            # Panel 3: MACD
+            if macd_line is not None:
+                addplots.append(mpf.make_addplot(macd_line, color='#2196f3', width=1.1, panel=3, ylabel='MACD'))
+            if macd_signal is not None:
+                addplots.append(mpf.make_addplot(macd_signal, color='#ff5722', width=1.1, panel=3))
+            if macd_hist is not None:
+                colors = ['#26a69a' if v >= 0 else '#ef5350' for v in macd_hist.fillna(0)]
+                addplots.append(mpf.make_addplot(macd_hist, type='bar', color=colors, panel=3))
+
+            # Panel 4: StochRSI + MAStochRSI
+            if stochrsi_k is not None:
+                addplots.append(mpf.make_addplot(stochrsi_k, color='#00bcd4', width=1.1, panel=4, ylabel='StochRSI'))
+            if stochrsi_d is not None:
+                addplots.append(mpf.make_addplot(stochrsi_d, color='#ff9800', width=1.0, panel=4))
+            if stochrsi_ma is not None:
+                addplots.append(mpf.make_addplot(stochrsi_ma, color='#e91e63', width=1.0, panel=4))
+            addplots.append(mpf.make_addplot(pd.Series(80, index=df_plot.index), color='red', width=0.6, linestyle='--', panel=4))
+            addplots.append(mpf.make_addplot(pd.Series(20, index=df_plot.index), color='green', width=0.6, linestyle='--', panel=4))
+
+            # Panel 5: KDJ
+            if kdj_k is not None:
+                addplots.append(mpf.make_addplot(kdj_k, color='#2196f3', width=1.1, panel=5, ylabel='KDJ'))
+            if kdj_d is not None:
+                addplots.append(mpf.make_addplot(kdj_d, color='#ff9800', width=1.0, panel=5))
+            if kdj_j is not None:
+                addplots.append(mpf.make_addplot(kdj_j, color='#9c27b0', width=1.0, panel=5))
+            addplots.append(mpf.make_addplot(pd.Series(80, index=df_plot.index), color='red', width=0.6, linestyle='--', panel=5))
+            addplots.append(mpf.make_addplot(pd.Series(20, index=df_plot.index), color='green', width=0.6, linestyle='--', panel=5))
+
+            # Hlines: Giriş / SL / TP + Fibonacci
+            hlines = {"hlines": [], "colors": [], "linestyle": [], "linewidths": [], "alpha": 0.85}
+            if giris is not None:
+                hlines["hlines"].append(giris)
+                hlines["colors"].append('#2196f3')
+                hlines["linestyle"].append('-')
+                hlines["linewidths"].append(1.6)
+            if stop is not None:
+                hlines["hlines"].append(stop)
+                hlines["colors"].append('#f44336')
+                hlines["linestyle"].append('-')
+                hlines["linewidths"].append(1.6)
+            if hedef is not None:
+                hlines["hlines"].append(hedef)
+                hlines["colors"].append('#4caf50')
+                hlines["linestyle"].append('-')
+                hlines["linewidths"].append(1.6)
+
+            # Fibonacci seviyeleri (fiyat panelinde)
+            fib_colors = {
+                0.236: '#9e9e9e', 0.382: '#ff9800', 0.5: '#2196f3',
+                0.618: '#4caf50', 0.786: '#e91e63', 0.886: '#9c27b0'
+            }
+            for ratio, level in fib_levels.items():
+                if level and np.isfinite(level):
+                    hlines["hlines"].append(level)
+                    hlines["colors"].append(fib_colors.get(ratio, '#757575'))
+                    hlines["linestyle"].append('--')
+                    hlines["linewidths"].append(0.9)
+
+            mc = mpf.make_marketcolors(
+                up='#26a69a', down='#ef5350',
+                edge='inherit',
+                wick={'up': '#26a69a', 'down': '#ef5350'},
+                volume='in'
+            )
+            s = mpf.make_mpf_style(
+                base_mpf_style='yahoo',
+                marketcolors=mc,
+                facecolor='white',
+                gridstyle=':',
+                y_on_right=False
+            )
+
+            panel_ratios = (0, 6, 1.2, 1.2, 1.2, 1.2, 1.2)  # main + 5 sub
+
+            dosya = os.path.join(ARTIFACT_DIR, f"{symbol.replace('-', '_')}_chart.png")
+            fig, axes = mpf.plot(
+                df_plot,
+                type='candle',
+                style=s,
+                addplot=addplots if addplots else None,
+                hlines=hlines if hlines["hlines"] else None,
+                title=f"{symbol} | {yon} | Skor: {skor:.2f}",
+                returnfig=True,
+                volume=False,
+                figsize=(14, 12),
+                panel_ratios=panel_ratios,
+                tight_layout=True
+            )
+
             ax = axes[0]
             if yon == "LONG":
-                ax.annotate('▲ LONG', xy=(0.02, 0.95), xycoords='axes fraction', fontsize=14, color='#26a69a', fontweight='bold')
+                ax.annotate('▲ LONG', xy=(0.02, 0.96), xycoords='axes fraction',
+                            fontsize=13, color='#26a69a', fontweight='bold')
             else:
-                ax.annotate('▼ SHORT', xy=(0.02, 0.95), xycoords='axes fraction', fontsize=14, color='#ef5350', fontweight='bold')
-            fig.savefig(dosya, dpi=130, bbox_inches='tight', facecolor='white')
+                ax.annotate('▼ SHORT', xy=(0.02, 0.96), xycoords='axes fraction',
+                            fontsize=13, color='#ef5350', fontweight='bold')
+
+            # Küçük legend notu
+            legend_txt = "EMA21 | MA50 | Fib | Vol+MA14 | RSI | MACD | StochRSI+MA | KDJ"
+            ax.annotate(legend_txt, xy=(0.5, 1.02), xycoords='axes fraction',
+                        fontsize=8, ha='center', color='#555555')
+
+            fig.savefig(dosya, dpi=120, bbox_inches='tight', facecolor='white')
             plt.close(fig)
             return dosya
         except Exception as e:
@@ -563,7 +694,7 @@ def tam_tarama():
                 guncel[coin] = fiyat
             if skor >= MIN_SKOR and df is not None and yon in ["LONG", "SHORT"]:
                 telegram_gonder(coin, skor, krit, fiyat, df, yon, mtf, bonus, info)
-            time.sleep(0.10)
+            time.sleep(0.15)
         except Exception as e:
             print(f"Hata {coin}: {e}")
     acik_islemleri_kontrol(guncel)
@@ -575,7 +706,7 @@ def tam_tarama():
 # ==========================================
 if __name__ == "__main__":
     telegram_mesaj(
-        "🚀 <b>Sanal İşlem Botu v13.3 Başlatıldı</b>\n\n"
+        "🚀 <b>Sanal İşlem Botu v13.4 Başlatıldı</b>\n\n"
         "💰 Başlangıç: $500\n"
         "⚡ 5x İzole | $15 Marjin\n"
         "✅ Skor: <b>15.0+</b>\n"
@@ -583,7 +714,8 @@ if __name__ == "__main__":
         "✅ ADX > 16\n"
         "✅ EMA21 engeli yok\n"
         "✅ Risk/Reward: 1:2\n"
-        f"✅ {len(HEDEF_COINLER)} coin\n"
+        f"✅ Coinler: {', '.join(HEDEF_COINLER)}\n"
+        "📊 Grafik: EMA21, MA50, Fib, Vol+MA14, RSI, MACD, StochRSI+MA, KDJ\n"
         "⏱ Her 1 dakika tarama"
     )
 
@@ -596,5 +728,4 @@ if __name__ == "__main__":
                 tam_tarama()
             except Exception as e:
                 print(f"Döngü hatası: {e}")
-            time.sleep(60) 
-    
+            time.sleep(60)
