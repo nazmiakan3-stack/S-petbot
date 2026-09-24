@@ -8,3 +8,4 @@ mplfinance
 openpyxl
 smartmoneyconcepts
 requests
+numpy
