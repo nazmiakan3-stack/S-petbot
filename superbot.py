@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Sanal İşlem Botu v14.0
+Sanal İşlem Botu v14.1 (Hacim Esnetildi & Saatlik PnL Raporu Eklendi)
 - 20 coin
 - Skor >= 15.0
 - Bollinger: üst banda dokun/aş → SHORT | alt banda dokun/geç → LONG
 - ATR SL = 1x | TP = 3x  (RR 1:3)
-- Saatlik rapor + pozisyon açılışında grafik dosya adı
-- Grafik: BB, EMA21, MA50, Fib, Vol+MA14, RSI, MACD, StochRSI+MA, KDJ
+- Saatlik rapor + Anlık PnL (Kar/Zarar) takibi + Grafik dosya adı
+- Hacim koşulu gevşetildi (0.35)
 """
 
 import os
+import sys
 import time
 import sqlite3
 import threading
@@ -29,13 +30,18 @@ import mplfinance as mpf
 from flask import Flask
 
 # ==========================================
+# 0. DOSYA ADI VE SİSTEM SABİTLERİ
+# ==========================================
+DOSYA_ADI = os.path.basename(__file__)
+
+# ==========================================
 # 1. FLASK
 # ==========================================
 app = Flask(__name__)
 
 @app.route("/")
 def health_check():
-    return "OK - Sanal İşlem Botu v14.0 Aktif", 200
+    return f"OK - Sanal İşlem Botu v14.1 Aktif | Dosya: {DOSYA_ADI}", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10003))
@@ -63,7 +69,7 @@ HOURLY_REPORT_MINUTES = 60
 
 MIN_SKOR = 15.0
 VOLUME_MA_LENGTH = 20
-VOLUME_MIN_RATIO = 0.60
+VOLUME_MIN_RATIO = 0.35  # Gevşetildi (Eski: 0.60 idi)
 
 ADX_LENGTH = 14
 ADX_MIN = 16.0
@@ -91,8 +97,16 @@ HEDEF_COINLER = [
 ]
 
 # ==========================================
-# YARDIMCI
+# YARDIMCI VE AÇILIŞ FONKSİYONLARI
 # ==========================================
+def acilis_mesaji_goster():
+    print("=" * 60)
+    print("🚀 SANAL İŞLEM BOTU v14.1 BAŞARIYLA BAŞLATILDI")
+    print(f"📂 Aktif Çalışan Dosya Adı : {DOSYA_ADI}")
+    print(f"📁 Artifact Dizini        : {ARTIFACT_DIR}")
+    print("🕒 Durum                  : Sistem aktif, piyasa verileri dinleniyor...")
+    print("=" * 60)
+
 def safe_max(x):
     try:
         arr = np.asarray(x, dtype=float)
@@ -147,7 +161,7 @@ def hacim_yeterli_mi(df: pd.DataFrame):
         return False, 0.0, 0.0
 
 # ==========================================
-# ANALİZ (SMC + BB + indikatörler)
+# ANALİZ
 # ==========================================
 def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
     if df is None or len(df) < 60:
@@ -159,11 +173,9 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
     df["MA200"] = ta.sma(df["close"], length=200)
     df["ATR"] = ta.atr(df["high"], df["low"], df["close"], length=14)
 
-    # Bollinger Bands
     bb = ta.bbands(df["close"], length=BB_LENGTH, std=BB_STD)
     bb_upper = bb_mid = bb_lower = None
     if bb is not None and not bb.empty:
-        # pandas_ta kolon sırası: BBL, BBM, BBU, BBB, BBP
         cols = list(bb.columns)
         for c in cols:
             if c.startswith("BBU"):
@@ -191,14 +203,8 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
     lower_val = float(bb_lower.iloc[-1]) if bb_lower is not None and pd.notna(bb_lower.iloc[-1]) else None
     mid_val = float(bb_mid.iloc[-1]) if bb_mid is not None and pd.notna(bb_mid.iloc[-1]) else None
 
-    # Üst banda dokunma / aşma → SHORT
-    # Alt banda dokunma / geçme → LONG
-    bb_touch_upper = False
-    bb_touch_lower = False
-    if upper_val is not None:
-        bb_touch_upper = (high_son >= upper_val) or (fiyat >= upper_val)
-    if lower_val is not None:
-        bb_touch_lower = (low_son <= lower_val) or (fiyat <= lower_val)
+    bb_touch_upper = (high_son >= upper_val) or (fiyat >= upper_val) if upper_val is not None else False
+    bb_touch_lower = (low_son <= lower_val) or (fiyat <= lower_val) if lower_val is not None else False
 
     def find_significant_swings(high_series, low_series, order=5, lookback=80):
         highs, lows = [], []
@@ -229,14 +235,12 @@ def basit_smc_ve_indikator(df: pd.DataFrame) -> dict:
 
     equal_high = equal_low = False
     tol = atr_val * 0.25
-    highs = df["high"].iloc[-20:]
-    lows = df["low"].iloc[-20:]
-    for i in range(len(highs) - 1):
-        if abs(highs.iloc[i] - highs.iloc[-1]) < tol:
+    for i in range(len(df["high"].iloc[-20:]) - 1):
+        if abs(df["high"].iloc[-20:].iloc[i] - df["high"].iloc[-20:].iloc[-1]) < tol:
             equal_high = True
             break
-    for i in range(len(lows) - 1):
-        if abs(lows.iloc[i] - lows.iloc[-1]) < tol:
+    for i in range(len(df["low"].iloc[-20:]) - 1):
+        if abs(df["low"].iloc[-20:].iloc[i] - df["low"].iloc[-20:].iloc[-1]) < tol:
             equal_low = True
             break
 
@@ -280,13 +284,10 @@ def skor_hesapla(info: dict):
     skor_l = skor_s = 0.0
     krit_l, krit_s = [], []
 
-    # Bollinger ağırlıklı
     if info.get("bb_touch_lower"):
-        skor_l += 4.50
-        krit_l.append("BB Alt Band 4.50")
+        skor_l += 4.50; krit_l.append("BB Alt Band 4.50")
     if info.get("bb_touch_upper"):
-        skor_s += 4.50
-        krit_s.append("BB Üst Band 4.50")
+        skor_s += 4.50; krit_s.append("BB Üst Band 4.50")
 
     if info.get("sellside_sweep"):
         skor_l += 1.57; krit_l.append("Liquidity Sweep 1.57")
@@ -345,7 +346,6 @@ def skor_hesapla(info: dict):
     elif adx >= ADX_MIN:
         skor_l += 0.40; skor_s += 0.40
 
-    # Yön: BB sinyali öncelikli
     if info.get("bb_touch_upper") and not info.get("bb_touch_lower"):
         return skor_s, krit_s, "SHORT"
     if info.get("bb_touch_lower") and not info.get("bb_touch_upper"):
@@ -368,14 +368,10 @@ def mtf_analiz(symbol: str):
             mtf_list.append(f"• {label}: DATA YOK")
             continue
         t = 1 if p > ma50 else -1
-        yon = "LONG" if t == 1 else "SHORT"
-        mtf_list.append(f"• {label}: {yon}")
-        if label == "1D":
-            t1 = t
-        elif label == "4H":
-            t4 = t
-        else:
-            t1h = t
+        mtf_list.append(f"• {label}: {'LONG' if t == 1 else 'SHORT'}")
+        if label == "1D": t1 = t
+        elif label == "4H": t4 = t
+        else: t1h = t
     bonus_l = 2.0 if (t1 == 1 and t4 == 1 and t1h == 1) else 0.0
     bonus_s = 2.0 if (t1 == -1 and t4 == -1 and t1h == -1) else 0.0
     return mtf_list, bonus_l, bonus_s
@@ -406,15 +402,13 @@ def db_kurulum():
         id INTEGER PRIMARY KEY AUTOINCREMENT, bakiye REAL DEFAULT 500.0, guncelleme TEXT)""")
     c.execute("SELECT COUNT(*) FROM cuzdan")
     if c.fetchone()[0] == 0:
-        c.execute("INSERT INTO cuzdan (bakiye, guncelleme) VALUES (?, ?)",
-                  (ILK_BAKIYE, datetime.now().isoformat()))
+        c.execute("INSERT INTO cuzdan (bakiye, guncelleme) VALUES (?, ?)", (ILK_BAKIYE, datetime.now().isoformat()))
     c.execute("""CREATE TABLE IF NOT EXISTS islemler (
         id INTEGER PRIMARY KEY AUTOINCREMENT, coin TEXT, yon TEXT, giris_fiyati REAL,
         hedef_r1 REAL, stop_loss REAL, orjinal_stop REAL, marjin REAL DEFAULT 15.0,
         kaldirac INTEGER DEFAULT 5, pozisyon_usd REAL DEFAULT 75.0, durum TEXT,
         kâr_r REAL DEFAULT 0.0, kâr_usd REAL DEFAULT 0.0, is_be INTEGER DEFAULT 0,
         tarih TEXT, skor REAL DEFAULT 0.0, grafik_dosya TEXT DEFAULT '')""")
-    # Eski DB'ye kolon ekle
     try:
         c.execute("ALTER TABLE islemler ADD COLUMN grafik_dosya TEXT DEFAULT ''")
     except Exception:
@@ -458,7 +452,7 @@ def bakiye_guncelle(pnl_usd: float):
 
 def acik_pozisyonlari_listele():
     conn, c = db_baglanti()
-    c.execute("""SELECT coin, yon, giris_fiyati, stop_loss, hedef_r1, tarih, skor, grafik_dosya
+    c.execute("""SELECT coin, yon, giris_fiyati, stop_loss, hedef_r1, tarih, skor, grafik_dosya, marjin, kaldirac
                  FROM islemler WHERE durum='ACIK' ORDER BY id DESC""")
     rows = c.fetchall()
     conn.close()
@@ -503,9 +497,9 @@ def telegram_foto(path, caption=""):
         print(f"Foto hatası: {e}")
 
 # ==========================================
-# SAATLİK RAPOR (dosya adları dahil)
+# SAATLİK RAPOR (Anlık Kar/Zarar Detaylı)
 # ==========================================
-def saatlik_rapor_gonder():
+def saatlik_rapor_gonder(guncel_fiyatlar: dict):
     global last_hourly_report
     now = datetime.now()
     if last_hourly_report and (now - last_hourly_report) < timedelta(minutes=HOURLY_REPORT_MINUTES):
@@ -514,39 +508,56 @@ def saatlik_rapor_gonder():
 
     pozisyonlar = acik_pozisyonlari_listele()
     bakiye = bakiye_oku()
-    mesaj = f"📋 <b>Saatlik Rapor</b> — {now.strftime('%Y-%m-%d %H:%M')}\n"
-    mesaj += f"💰 Cüzdan: <b>${bakiye:.2f}</b>\n"
-    mesaj += f"📂 ARTIFACT_DIR: <code>{ARTIFACT_DIR}</code>\n\n"
+    
+    mesaj = f"📋 <b>SAATLİK DURUM VE PnL RAPORU</b>\n"
+    mesaj += f"🕒 Zaman: {now.strftime('%Y-%m-%d %H:%M')}\n"
+    mesaj += f"📂 Kaynak Dosya: <code>{DOSYA_ADI}</code>\n"
+    mesaj += f"💰 Cüzdan Bakiyesi: <b>${bakiye:.2f}</b>\n\n"
 
     if not pozisyonlar:
-        mesaj += "Açık pozisyon yok.\n"
+        mesaj += "Şu anda açık aktif pozisyon bulunmuyor.\n"
     else:
-        mesaj += f"<b>Açık pozisyonlar ({len(pozisyonlar)}):</b>\n"
-        for coin, yon, giris, stop, hedef, tarih, skor, grafik in pozisyonlar:
-            dosya_adi = grafik if grafik else f"{coin.replace('-', '_')}_chart.png"
+        mesaj += f"<b>Açık Pozisyonlar ve Canlı Kar/Zarar ({len(pozisyonlar)} Adet):</b>\n"
+        toplam_anlik_pnl = 0.0
+        
+        for row in pozisyonlar:
+            coin, yon, giris, stop, hedef, tarih, skor, grafik, marjin, kaldirac = row
+            anlik_fiyat = guncel_fiyatlar.get(coin, giris)
+            
+            # Anlık PnL Hesaplama ($ ve %)
+            if yon == "LONG":
+                pnl_yuzde = ((anlik_fiyat - giris) / giris) * 100 * kaldirac
+            else:
+                pnl_yuzde = ((giris - anlik_fiyat) / giris) * 100 * kaldirac
+                
+            pnl_usd = (marjin * kaldirac) * (pnl_yuzde / 100)
+            toplam_anlik_pnl += pnl_usd
+            
+             emoji = "🟢" if pnl_usd >= 0 else "🔴"
             mesaj += (
-                f"\n• <b>{coin}</b> {yon}\n"
-                f"  Giriş: {giris:.6f} | SL: {stop:.6f} | TP: {hedef:.6f}\n"
-                f"  Skor: {skor:.1f} | Açılış: {tarih}\n"
-                f"  📎 Dosya: <code>{dosya_adi}</code>\n"
+                f"\n• <b>{coin}</b> ({yon} {kaldirac}x)\n"
+                f"  Giriş: {giris:.4f} | Anlık: {anlik_fiyat:.4f}\n"
+                f"  {emoji} Kar/Zarar: <b>${pnl_usd:+.2f} (%{pnl_yuzde:+.2f})</b>\n"
+                f"  Skor: {skor:.1f} | Dosya: <code>{grafik or 'Yok'}</code>\n"
             )
+        mesaj += f"\n────────────────────\n"
+        mesaj += f"📊 <b>Toplam Açık PnL: ${toplam_anlik_pnl:+.2f}</b>\n"
+        
     telegram_mesaj(mesaj)
 
 # ==========================================
-# GRAFİK
+# GRAFİK ÇİZİMİ
 # ==========================================
 def grafik_ciz(df, symbol, yon, skor, info=None, giris=None, stop=None, hedef=None):
     with matplotlib_lock:
         try:
             if df is None or len(df) < 50:
                 return None
-
             df_plot = df.copy().sort_index(ascending=True).tail(120)
             df_plot = df_plot.rename(columns={
                 "open": "Open", "high": "High", "low": "Low",
                 "close": "Close", "volume": "Volume",
             })
-
             close = df_plot["Close"]
             high = df_plot["High"]
             low = df_plot["Low"]
@@ -561,12 +572,9 @@ def grafik_ciz(df, symbol, yon, skor, info=None, giris=None, stop=None, hedef=No
             bb_u = bb_m = bb_l = None
             if bb is not None:
                 for c in bb.columns:
-                    if c.startswith("BBU"):
-                        bb_u = bb[c]
-                    elif c.startswith("BBM"):
-                        bb_m = bb[c]
-                    elif c.startswith("BBL"):
-                        bb_l = bb[c]
+                    if c.startswith("BBU"): bb_u = bb[c]
+                    elif c.startswith("BBM"): bb_m = bb[c]
+                    elif c.startswith("BBL"): bb_l = bb[c]
 
             macd_df = ta.macd(close, fast=12, slow=26, signal=9)
             macd_line = macd_df.iloc[:, 0] if macd_df is not None else None
@@ -586,98 +594,53 @@ def grafik_ciz(df, symbol, yon, skor, info=None, giris=None, stop=None, hedef=No
             fib_levels = (info or {}).get("fib_levels") or {}
             addplots = []
 
-            if ema21 is not None and ema21.notna().sum() > 5:
-                addplots.append(mpf.make_addplot(ema21, color="#ff9800", width=1.3, panel=0))
-            if ma50 is not None and ma50.notna().sum() > 5:
-                addplots.append(mpf.make_addplot(ma50, color="#1e88e5", width=1.5, panel=0))
-            if bb_u is not None:
-                addplots.append(mpf.make_addplot(bb_u, color="#e91e63", width=1.0, panel=0))
-            if bb_m is not None:
-                addplots.append(mpf.make_addplot(bb_m, color="#9e9e9e", width=0.8, panel=0))
-            if bb_l is not None:
-                addplots.append(mpf.make_addplot(bb_l, color="#4caf50", width=1.0, panel=0))
+            if ema21 is not None: addplots.append(mpf.make_addplot(ema21, color="#ff9800", width=1.3, panel=0))
+            if ma50 is not None: addplots.append(mpf.make_addplot(ma50, color="#1e88e5", width=1.5, panel=0))
+            if bb_u is not None: addplots.append(mpf.make_addplot(bb_u, color="#e91e63", width=1.0, panel=0))
+            if bb_m is not None: addplots.append(mpf.make_addplot(bb_m, color="#9e9e9e", width=0.8, panel=0))
+            if bb_l is not None: addplots.append(mpf.make_addplot(bb_l, color="#4caf50", width=1.0, panel=0))
 
             addplots.append(mpf.make_addplot(volume, type="bar", color="#90caf9", panel=1, ylabel="Vol"))
-            if vol_ma14 is not None and vol_ma14.notna().sum() > 3:
-                addplots.append(mpf.make_addplot(vol_ma14, color="#e91e63", width=1.2, panel=1))
-
-            if rsi is not None and rsi.notna().sum() > 5:
+            if vol_ma14 is not None: addplots.append(mpf.make_addplot(vol_ma14, color="#e91e63", width=1.2, panel=1))
+            if rsi is not None:
                 addplots.append(mpf.make_addplot(rsi, color="#9c27b0", width=1.2, panel=2, ylabel="RSI"))
                 addplots.append(mpf.make_addplot(pd.Series(70, index=df_plot.index), color="red", width=0.7, linestyle="--", panel=2))
                 addplots.append(mpf.make_addplot(pd.Series(30, index=df_plot.index), color="green", width=0.7, linestyle="--", panel=2))
 
-            if macd_line is not None:
-                addplots.append(mpf.make_addplot(macd_line, color="#2196f3", width=1.1, panel=3, ylabel="MACD"))
-            if macd_signal is not None:
-                addplots.append(mpf.make_addplot(macd_signal, color="#ff5722", width=1.1, panel=3))
+            if macd_line is not None: addplots.append(mpf.make_addplot(macd_line, color="#2196f3", width=1.1, panel=3, ylabel="MACD"))
+            if macd_signal is not None: addplots.append(mpf.make_addplot(macd_signal, color="#ff5722", width=1.1, panel=3))
             if macd_hist is not None:
                 colors = ["#26a69a" if v >= 0 else "#ef5350" for v in macd_hist.fillna(0)]
                 addplots.append(mpf.make_addplot(macd_hist, type="bar", color=colors, panel=3))
 
-            if stochrsi_k is not None:
-                addplots.append(mpf.make_addplot(stochrsi_k, color="#00bcd4", width=1.1, panel=4, ylabel="StochRSI"))
-            if stochrsi_d is not None:
-                addplots.append(mpf.make_addplot(stochrsi_d, color="#ff9800", width=1.0, panel=4))
-            if stochrsi_ma is not None:
-                addplots.append(mpf.make_addplot(stochrsi_ma, color="#e91e63", width=1.0, panel=4))
-            addplots.append(mpf.make_addplot(pd.Series(80, index=df_plot.index), color="red", width=0.6, linestyle="--", panel=4))
-            addplots.append(mpf.make_addplot(pd.Series(20, index=df_plot.index), color="green", width=0.6, linestyle="--", panel=4))
+            if stochrsi_k is not None: addplots.append(mpf.make_addplot(stochrsi_k, color="#00bcd4", width=1.1, panel=4, ylabel="StochRSI"))
+            if stochrsi_d is not None: addplots.append(mpf.make_addplot(stochrsi_d, color="#ff9800", width=1.0, panel=4))
+            if stochrsi_ma is not None: addplots.append(mpf.make_addplot(stochrsi_ma, color="#e91e63", width=1.0, panel=4))
 
-            if kdj_k is not None:
-                addplots.append(mpf.make_addplot(kdj_k, color="#2196f3", width=1.1, panel=5, ylabel="KDJ"))
-            if kdj_d is not None:
-                addplots.append(mpf.make_addplot(kdj_d, color="#ff9800", width=1.0, panel=5))
-            if kdj_j is not None:
-                addplots.append(mpf.make_addplot(kdj_j, color="#9c27b0", width=1.0, panel=5))
-            addplots.append(mpf.make_addplot(pd.Series(80, index=df_plot.index), color="red", width=0.6, linestyle="--", panel=5))
-            addplots.append(mpf.make_addplot(pd.Series(20, index=df_plot.index), color="green", width=0.6, linestyle="--", panel=5))
+            if kdj_k is not None: addplots.append(mpf.make_addplot(kdj_k, color="#2196f3", width=1.1, panel=5, ylabel="KDJ"))
+            if kdj_d is not None: addplots.append(mpf.make_addplot(kdj_d, color="#ff9800", width=1.0, panel=5))
+            if kdj_j is not None: addplots.append(mpf.make_addplot(kdj_j, color="#9c27b0", width=1.0, panel=5))
 
             hlines = {"hlines": [], "colors": [], "linestyle": [], "linewidths": [], "alpha": 0.85}
             if giris is not None:
-                hlines["hlines"].append(giris); hlines["colors"].append("#2196f3")
-                hlines["linestyle"].append("-"); hlines["linewidths"].append(1.6)
+                hlines["hlines"].append(giris); hlines["colors"].append("#2196f3"); hlines["linestyle"].append("-"); hlines["linewidths"].append(1.6)
             if stop is not None:
-                hlines["hlines"].append(stop); hlines["colors"].append("#f44336")
-                hlines["linestyle"].append("-"); hlines["linewidths"].append(1.6)
+                hlines["hlines"].append(stop); hlines["colors"].append("#f44336"); hlines["linestyle"].append("-"); hlines["linewidths"].append(1.6)
             if hedef is not None:
-                hlines["hlines"].append(hedef); hlines["colors"].append("#4caf50")
-                hlines["linestyle"].append("-"); hlines["linewidths"].append(1.6)
-
-            fib_colors = {
-                0.236: "#9e9e9e", 0.382: "#ff9800", 0.5: "#2196f3",
-                0.618: "#4caf50", 0.786: "#e91e63", 0.886: "#9c27b0",
-            }
-            for ratio, level in fib_levels.items():
-                if level and np.isfinite(level):
-                    hlines["hlines"].append(level)
-                    hlines["colors"].append(fib_colors.get(ratio, "#757575"))
-                    hlines["linestyle"].append("--")
-                    hlines["linewidths"].append(0.9)
-
-            mc = mpf.make_marketcolors(
-                up="#26a69a", down="#ef5350", edge="inherit",
-                wick={"up": "#26a69a", "down": "#ef5350"}, volume="in",
-            )
-            s = mpf.make_mpf_style(base_mpf_style="yahoo", marketcolors=mc, facecolor="white", gridstyle=":", y_on_right=False)
-            panel_ratios = (0, 6, 1.2, 1.2, 1.2, 1.2, 1.2)
+                hlines["hlines"].append(hedef); hlines["colors"].append("#4caf50"); hlines["linestyle"].append("-"); hlines["linewidths"].append(1.6)
 
             dosya_adi = f"{symbol.replace('-', '_')}_chart.png"
             dosya = os.path.join(ARTIFACT_DIR, dosya_adi)
+            mc = mpf.make_marketcolors(up="#26a69a", down="#ef5350", edge="inherit", wick={"up": "#26a69a", "down": "#ef5350"}, volume="in")
+            s = mpf.make_mpf_style(base_mpf_style="yahoo", marketcolors=mc, facecolor="white", gridstyle=":")
+            
             fig, axes = mpf.plot(
-                df_plot, type="candle", style=s,
-                addplot=addplots if addplots else None,
-                hlines=hlines if hlines["hlines"] else None,
-                title=f"{symbol} | {yon} | Skor: {skor:.2f} | BB",
-                returnfig=True, volume=False, figsize=(14, 12),
-                panel_ratios=panel_ratios, tight_layout=True,
+                df_plot, type="candle", style=s, addplot=addplots, hlines=hlines if hlines["hlines"] else None,
+                title=f"{symbol} | {yon} | Skor: {skor:.2f} | Dosya: {DOSYA_ADI}",
+                returnfig=True, volume=False, figsize=(14, 12), panel_ratios=(0, 6, 1.2, 1.2, 1.2, 1.2, 1.2), tight_layout=True,
             )
             ax = axes[0]
-            if yon == "LONG":
-                ax.annotate("▲ LONG", xy=(0.02, 0.96), xycoords="axes fraction", fontsize=13, color="#26a69a", fontweight="bold")
-            else:
-                ax.annotate("▼ SHORT", xy=(0.02, 0.96), xycoords="axes fraction", fontsize=13, color="#ef5350", fontweight="bold")
-            ax.annotate("BB | EMA21 | MA50 | Fib | Vol+MA14 | RSI | MACD | StochRSI | KDJ",
-                        xy=(0.5, 1.02), xycoords="axes fraction", fontsize=8, ha="center", color="#555555")
+            ax.annotate(f"▲ {yon}" if yon=="LONG" else f"▼ {yon}", xy=(0.02, 0.96), xycoords="axes fraction", fontsize=13, color="#26a69a" if yon=="LONG" else "#ef5350", fontweight="bold")
             fig.savefig(dosya, dpi=120, bbox_inches="tight", facecolor="white")
             plt.close(fig)
             return dosya
@@ -687,82 +650,46 @@ def grafik_ciz(df, symbol, yon, skor, info=None, giris=None, stop=None, hedef=No
             return None
 
 # ==========================================
-# SİNYAL
+# SİNYAL VE İŞLEM AÇMA
 # ==========================================
 def telegram_gonder(symbol, skor, kriterler, fiyat, df, yon, mtf_list, mtf_bonus, info=None):
     now = datetime.now()
-    if acik_pozisyon_var_mi(symbol):
-        return
+    if acik_pozisyon_var_mi(symbol): return
     last = last_signal_time.get(symbol)
-    if last and (now - last) < timedelta(minutes=SIGNAL_COOLDOWN_MINUTES):
-        return
+    if last and (now - last) < timedelta(minutes=SIGNAL_COOLDOWN_MINUTES): return
 
-    # Bollinger zorunlu: LONG için alt band, SHORT için üst band
-    if yon == "LONG" and not (info and info.get("bb_touch_lower")):
-        return
-    if yon == "SHORT" and not (info and info.get("bb_touch_upper")):
-        return
+    if yon == "LONG" and not (info and info.get("bb_touch_lower")): return
+    if yon == "SHORT" and not (info and info.get("bb_touch_upper")): return
 
     hacim_ok, son_hacim, ort_hacim = hacim_yeterli_mi(df)
-    if not hacim_ok:
-        return
-    if info and info.get("adx", 0) < ADX_MIN:
-        return
+    if not hacim_ok: return
+    if info and info.get("adx", 0) < ADX_MIN: return
 
     atr = info.get("atr") if info else None
-    if atr is None or pd.isna(atr) or atr <= 0:
-        atr = ta.atr(df["high"], df["low"], df["close"], 14).iloc[-1]
-    if pd.isna(atr) or atr <= 0:
-        atr = fiyat * 0.02
+    if not atr or atr <= 0: atr = fiyat * 0.02
 
-    # SL = 1x ATR, TP = 3x ATR
-    if yon == "LONG":
-        stop = fiyat - atr * ATR_SL_MULT
-        hedef = fiyat + atr * ATR_TP_MULT
-    else:
-        stop = fiyat + atr * ATR_SL_MULT
-        hedef = fiyat - atr * ATR_TP_MULT
+    stop = fiyat - atr * ATR_SL_MULT if yon == "LONG" else fiyat + atr * ATR_SL_MULT
+    hedef = fiyat + atr * ATR_TP_MULT if yon == "LONG" else fiyat - atr * ATR_TP_MULT
 
     dosya_adi = f"{symbol.replace('-', '_')}_chart.png"
     foto = grafik_ciz(df, symbol, yon, skor, info, giris=fiyat, stop=stop, hedef=hedef)
-    if foto:
-        dosya_adi = os.path.basename(foto)
+    if foto: dosya_adi = os.path.basename(foto)
 
-    if not islem_kaydet(symbol, yon, fiyat, stop, hedef, skor, grafik_dosya=dosya_adi):
-        return
+    if not islem_kaydet(symbol, yon, fiyat, stop, hedef, skor, grafik_dosya=dosya_adi): return
     last_signal_time[symbol] = now
 
-    bb_txt = ""
-    if info:
-        if yon == "SHORT" and info.get("bb_upper"):
-            bb_txt = f"BB Üst: {info['bb_upper']:.6f}"
-        elif yon == "LONG" and info.get("bb_lower"):
-            bb_txt = f"BB Alt: {info['bb_lower']:.6f}"
-
     mesaj = f"🧠 <b>{symbol.replace('-', '/')} – {yon} (5x)</b>\n"
+    mesaj += f"📂 Kaynak Dosya: <code>{DOSYA_ADI}</code>\n"
     mesaj += f"⭐ Skor: <b>{skor:.2f}</b> | Min: {MIN_SKOR}\n"
-    if mtf_bonus > 0:
-        mesaj += f"⏱ MTF bonus: +{mtf_bonus:.2f}\n"
-    mesaj += f"📐 Bollinger: {bb_txt}\n"
-    mesaj += f"💼 Marjin: ${MARJIN_USD} | Pozisyon: ${POZISYON_USD}\n"
-    mesaj += f"📊 Hacim: %{(son_hacim / ort_hacim * 100):.0f} | ADX: {info.get('adx', 0):.1f} | ATR: {atr:.6f}\n\n"
-    mesaj += "<b>Kriterler:</b>\n"
-    for k in kriterler[:8]:
-        mesaj += f"• {k}\n"
-    mesaj += (
-        f"\n────────────────────\n"
-        f"💰 <b>GİRİŞ:</b> {fiyat:.6f}\n"
-        f"🛡 <b>SL (1×ATR):</b> {stop:.6f}\n"
-        f"🎯 <b>TP (3×ATR):</b> {hedef:.6f}\n"
-        f"📎 <b>Dosya:</b> <code>{dosya_adi}</code>\n\n"
-        f"⚠️ Sanal işlem | RR 1:3"
-    )
-    if foto:
-        telegram_foto(foto, f"{symbol} | {yon} | {skor:.2f} | {dosya_adi}")
-    telegram_mesaj(mesaj)
+    mesaj += f"💼 Marjin: ${MARJIN_USD} | Pozisyon: ${POZISYON_USD}\n\n"
+    mesaj += f"💰 <b>GİRİŞ:</b> {fiyat:.4f}\n🛡 <b>SL:</b> {stop:.4f}\n🎯 <b>TP:</b> {hedef:.4f}\n"
+    mesaj += f"📎 <b>Grafik:</b> <code>{dosya_adi}</code>"
+    
+    if foto: telegram_foto(foto, mesaj)
+    else: telegram_mesaj(mesaj)
 
 # ==========================================
-# AÇIK POZİSYON KONTROLÜ
+# POZİSYON KONTROLÜ
 # ==========================================
 def acik_islemleri_kontrol(guncel_fiyatlar: dict):
     conn, c = db_baglanti()
@@ -772,14 +699,12 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
     rows = c.fetchall()
     for row in rows:
         islem_id, coin, yon, giris, hedef, stop, orj_stop, is_be, poz_usd, marjin, grafik = row
-        if coin not in guncel_fiyatlar:
-            continue
+        if coin not in guncel_fiyatlar: continue
         anlik = guncel_fiyatlar[coin]
         risk = abs(giris - (orj_stop or stop))
-        if risk <= 0:
-            continue
+        if risk <= 0: continue
         mevcut_r = (anlik - giris) / risk if yon == "LONG" else (giris - anlik) / risk
-        dosya_notu = f"\n📎 {grafik}" if grafik else ""
+        dosya_notu = f"\n📎 Dosya: <code>{DOSYA_ADI}</code>"
 
         if mevcut_r >= 1.0 and is_be == 0:
             c.execute("UPDATE islemler SET stop_loss=?, is_be=1 WHERE id=?", (giris, islem_id))
@@ -787,7 +712,7 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
 
         if yon == "LONG":
             if anlik >= hedef:
-                pnl = marjin * ATR_TP_MULT  # 3R
+                pnl = marjin * ATR_TP_MULT
                 yeni = bakiye_guncelle(pnl)
                 telegram_mesaj(f"✅ <b>{coin} LONG TP 3R</b>\n+${pnl:.2f} | Cüzdan: ${yeni:.2f}{dosya_notu}")
                 c.execute("UPDATE islemler SET durum='WIN', kâr_r=3.0, kâr_usd=? WHERE id=?", (pnl, islem_id))
@@ -796,8 +721,7 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
                 bakiye_guncelle(pnl)
                 durum = "BE" if is_be else "LOSS"
                 telegram_mesaj(f"{'🛡' if is_be else '❌'} <b>{coin} LONG</b> {durum}\n${pnl:+.2f}{dosya_notu}")
-                c.execute("UPDATE islemler SET durum=?, kâr_r=?, kâr_usd=? WHERE id=?",
-                          (durum, 0.0 if is_be else -1.0, pnl, islem_id))
+                c.execute("UPDATE islemler SET durum=?, kâr_r=?, kâr_usd=? WHERE id=?", (durum, 0.0 if is_be else -1.0, pnl, islem_id))
         else:
             if anlik <= hedef:
                 pnl = marjin * ATR_TP_MULT
@@ -809,35 +733,34 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
                 bakiye_guncelle(pnl)
                 durum = "BE" if is_be else "LOSS"
                 telegram_mesaj(f"{'🛡' if is_be else '❌'} <b>{coin} SHORT</b> {durum}\n${pnl:+.2f}{dosya_notu}")
-                c.execute("UPDATE islemler SET durum=?, kâr_r=?, kâr_usd=? WHERE id=?",
-                          (durum, 0.0 if is_be else -1.0, pnl, islem_id))
+                c.execute("UPDATE islemler SET durum=?, kâr_r=?, kâr_usd=? WHERE id=?", (durum, 0.0 if is_be else -1.0, pnl, islem_id))
     conn.commit()
     conn.close()
 
 # ==========================================
-# ANA TARAMA
+# ANA TARAMA DÖNGÜSÜ
 # ==========================================
 def tam_tarama():
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Tarama başladı...")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Tarama başladı (Dosya: {DOSYA_ADI})...")
     db_kurulum()
     guncel = {}
     for coin in HEDEF_COINLER:
         try:
             skor, krit, fiyat, df, yon, mtf, bonus, info = analiz_yap(coin)
-            if fiyat:
-                guncel[coin] = fiyat
-            # Skor + BB yön zorunlu
+            if fiyat: guncel[coin] = fiyat
             if skor >= MIN_SKOR and df is not None and yon in ("LONG", "SHORT"):
                 if info and (info.get("bb_touch_upper") or info.get("bb_touch_lower")):
                     telegram_gonder(coin, skor, krit, fiyat, df, yon, mtf, bonus, info)
             time.sleep(0.12)
         except Exception as e:
             print(f"Hata {coin}: {e}")
+            
     acik_islemleri_kontrol(guncel)
     try:
-        saatlik_rapor_gonder()
+        saatlik_rapor_gonder(guncel)
     except Exception as e:
         print(f"Rapor hatası: {e}")
+        
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Tarama bitti.")
     return guncel
 
@@ -845,16 +768,12 @@ def tam_tarama():
 # BAŞLANGIÇ
 # ==========================================
 if __name__ == "__main__":
+    acilis_mesaji_goster()
     telegram_mesaj(
-        "🚀 <b>Sanal İşlem Botu v14.0 Başlatıldı</b>\n\n"
-        "💰 Başlangıç: $500\n"
-        "⚡ 5x İzole | $15 Marjin\n"
-        f"✅ Skor: <b>{MIN_SKOR}+</b>\n"
-        "✅ Bollinger: Üst→SHORT | Alt→LONG\n"
-        f"✅ SL: {ATR_SL_MULT}×ATR | TP: {ATR_TP_MULT}×ATR (RR 1:3)\n"
-        f"✅ {len(HEDEF_COINLER)} coin\n"
-        "📋 Saatlik rapor + grafik dosya adı\n"
-        "⏱ Her 1 dakika tarama"
+        f"🚀 <b>Sanal İşlem Botu v14.1 Başlatıldı</b>\n\n"
+        f"📂 Aktif Dosya: <code>{DOSYA_ADI}</code>\n"
+        f"⚡ Hacim filtresi esnetildi (0.35)\n"
+        f"📋 Saatlik anlık Kar/Zarar raporu aktif!"
     )
 
     if RUN_ONCE:
