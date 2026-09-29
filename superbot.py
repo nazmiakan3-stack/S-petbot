@@ -524,7 +524,6 @@ def saatlik_rapor_gonder(guncel_fiyatlar: dict):
             coin, yon, giris, stop, hedef, tarih, skor, grafik, marjin, kaldirac = row
             anlik_fiyat = guncel_fiyatlar.get(coin, giris)
             
-            # Anlık PnL Hesaplama ($ ve %)
             if yon == "LONG":
                 pnl_yuzde = ((anlik_fiyat - giris) / giris) * 100 * kaldirac
             else:
@@ -533,7 +532,7 @@ def saatlik_rapor_gonder(guncel_fiyatlar: dict):
             pnl_usd = (marjin * kaldirac) * (pnl_yuzde / 100)
             toplam_anlik_pnl += pnl_usd
             
-             emoji = "🟢" if pnl_usd >= 0 else "🔴"
+            emoji = "🟢" if pnl_usd >= 0 else "🔴"
             mesaj += (
                 f"\n• <b>{coin}</b> ({yon} {kaldirac}x)\n"
                 f"  Giriş: {giris:.4f} | Anlık: {anlik_fiyat:.4f}\n"
@@ -591,7 +590,6 @@ def grafik_ciz(df, symbol, yon, skor, info=None, giris=None, stop=None, hedef=No
             kdj_d = kdj.iloc[:, 1] if kdj is not None else None
             kdj_j = kdj.iloc[:, 2] if kdj is not None else None
 
-            fib_levels = (info or {}).get("fib_levels") or {}
             addplots = []
 
             if ema21 is not None: addplots.append(mpf.make_addplot(ema21, color="#ff9800", width=1.3, panel=0))
