@@ -62,16 +62,18 @@ TP_USD = 30.0              # TP kar (3R)
 KALDIRAC = 5
 POZISYON_USD = MARJIN_USD * KALDIRAC  # 75 USDT notional
 
-SIGNAL_COOLDOWN_MINUTES = 35
+SIGNAL_COOLDOWN_MINUTES = 15   # onceki 35 → daha sik sinyal
 HOURLY_REPORT_MINUTES = 60
 
 VOLUME_MA_LENGTH = 20
-VOLUME_MIN_RATIO = 0.35
+VOLUME_MIN_RATIO = 0.25        # onceki 0.35 → gevsetildi
 
 ST_LENGTH = 10
 ST_MULT = 3.0
 RSI_LONG_MAX = 70.0
 RSI_SHORT_MIN = 30.0
+# ST cizgisine donus (pullback) toleransi: ATR'nin yuzdesi
+ST_TOUCH_ATR_FRAC = 0.35
 
 ATR_SL_MULT = 1.0
 ATR_TP_MULT = 3.0
@@ -166,6 +168,7 @@ def hacim_yeterli_mi(df: pd.DataFrame):
 
 
 def supertrend_hesapla(df: pd.DataFrame):
+    """Donus: st_line, d_now, st_buy_flip, st_sell_flip"""
     st = ta.supertrend(df["high"], df["low"], df["close"], length=ST_LENGTH, multiplier=ST_MULT)
     if st is None or st.empty:
         return None, 0.0, False, False
@@ -211,12 +214,43 @@ def basit_analiz(df: pd.DataFrame) -> dict:
     df["ATR"] = ta.atr(df["high"], df["low"], df["close"], length=14)
     df["MA50"] = ta.sma(df["close"], length=50)
 
-    st_line, st_dir, st_buy, st_sell = supertrend_hesapla(df)
+    st_line, st_dir, st_buy_flip, st_sell_flip = supertrend_hesapla(df)
     fiyat = float(df["close"].iloc[-1])
+    low_son = float(df["low"].iloc[-1])
+    high_son = float(df["high"].iloc[-1])
     rsi_val = float(df["RSI"].iloc[-1]) if pd.notna(df["RSI"].iloc[-1]) else 50.0
     atr_val = float(df["ATR"].iloc[-1]) if pd.notna(df["ATR"].iloc[-1]) else fiyat * 0.02
 
-    # Fibonacci (son swing)
+    st_line_val = float(st_line.iloc[-1]) if st_line is not None and pd.notna(st_line.iloc[-1]) else None
+
+    # Trend devam + ST cizgisine dokunus / yakin pullback
+    # LONG: ST bullish (d>0) ve low ST'ye ATR*frac kadar yaklasti veya kesti, close hala ustunde
+    # SHORT: ST bearish ve high ST'ye yaklasti, close hala altinda
+    st_pullback_long = False
+    st_pullback_short = False
+    if st_line_val is not None and atr_val > 0:
+        tol = atr_val * ST_TOUCH_ATR_FRAC
+        if st_dir > 0 and fiyat >= st_line_val:
+            # mum ST'ye degdi veya cok yaklasti
+            if low_son <= st_line_val + tol:
+                st_pullback_long = True
+        if st_dir < 0 and fiyat <= st_line_val:
+            if high_son >= st_line_val - tol:
+                st_pullback_short = True
+
+    # Nihai sinyal: flip VEYA pullback
+    st_buy = bool(st_buy_flip or st_pullback_long)
+    st_sell = bool(st_sell_flip or st_pullback_short)
+    sinyal_tipi = ""
+    if st_buy_flip:
+        sinyal_tipi = "FLIP"
+    elif st_pullback_long:
+        sinyal_tipi = "PULLBACK"
+    if st_sell_flip:
+        sinyal_tipi = "FLIP"
+    elif st_pullback_short:
+        sinyal_tipi = "PULLBACK"
+
     look = min(80, len(df))
     hi = float(df["high"].iloc[-look:].max())
     lo = float(df["low"].iloc[-look:].min())
@@ -226,16 +260,19 @@ def basit_analiz(df: pd.DataFrame) -> dict:
         for r in (0.236, 0.382, 0.5, 0.618, 0.786, 0.886):
             fib_levels[r] = hi - rng * r
 
-    st_line_val = float(st_line.iloc[-1]) if st_line is not None and pd.notna(st_line.iloc[-1]) else None
-
     return {
         "fiyat": fiyat,
         "rsi": rsi_val,
         "atr": atr_val,
         "st_line": st_line_val,
         "st_dir": st_dir,
-        "st_buy": bool(st_buy),
-        "st_sell": bool(st_sell),
+        "st_buy": st_buy,
+        "st_sell": st_sell,
+        "st_buy_flip": bool(st_buy_flip),
+        "st_sell_flip": bool(st_sell_flip),
+        "st_pullback_long": st_pullback_long,
+        "st_pullback_short": st_pullback_short,
+        "sinyal_tipi": sinyal_tipi,
         "rsi_ok_long": rsi_val < RSI_LONG_MAX,
         "rsi_ok_short": rsi_val > RSI_SHORT_MIN,
         "fib_levels": fib_levels,
@@ -257,10 +294,10 @@ def analiz_yap(symbol: str):
     else:
         yon = "YOK"
     skor = 0.0
-    if info.get("st_buy"):
+    if info.get("st_buy_flip") or info.get("st_sell_flip"):
         skor += 7.0
-    if info.get("st_sell"):
-        skor += 7.0
+    if info.get("st_pullback_long") or info.get("st_pullback_short"):
+        skor += 5.0
     if info.get("rsi_ok_long") and yon == "LONG":
         skor += 2.0
     if info.get("rsi_ok_short") and yon == "SHORT":
@@ -742,9 +779,11 @@ def telegram_gonder(symbol, skor, fiyat, df, yon, info):
         return
     last_signal_time[symbol] = now
 
+    tip = info.get("sinyal_tipi") or ("FLIP" if (info.get("st_buy_flip") or info.get("st_sell_flip")) else "PULLBACK")
     mesaj = (
         f"⚡ <b>{symbol}</b> — <b>{yon}</b> (VADELİ İZOLE)\n"
         f"📂 <code>{DOSYA_ADI}</code>\n"
+        f"📌 Sinyal: <b>{tip}</b> (ST flip veya çizgiye dönüş)\n"
         f"⭐ Skor: {skor:.1f} | RSI: {info.get('rsi', 0):.1f}\n"
         f"🔒 Marjin: <b>${MARJIN_USD:.0f}</b> | Risk SL: <b>${RISK_USD:.0f}</b> | TP: <b>${TP_USD:.0f}</b>\n"
         f"📊 {KALDIRAC}x | Notional ~${POZISYON_USD:.0f}\n"
@@ -816,6 +855,7 @@ def tam_tarama():
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Vadeli tarama | {DOSYA_ADI}")
     db_kurulum()
     guncel = {}
+    n_flip = n_pull = n_sinyal = 0
     for coin in HEDEF_COINLER:
         try:
             result = analiz_yap(coin)
@@ -825,10 +865,16 @@ def tam_tarama():
                 continue
             if fiyat:
                 guncel[coin] = fiyat
+            if info:
+                if info.get("st_buy_flip") or info.get("st_sell_flip"):
+                    n_flip += 1
+                if info.get("st_pullback_long") or info.get("st_pullback_short"):
+                    n_pull += 1
             if df is not None and yon in ("LONG", "SHORT") and info:
                 if (yon == "LONG" and info.get("st_buy") and info.get("rsi_ok_long")) or (
                     yon == "SHORT" and info.get("st_sell") and info.get("rsi_ok_short")
                 ):
+                    n_sinyal += 1
                     telegram_gonder(coin, skor, fiyat, df, yon, info)
             time.sleep(0.10)
         except Exception as e:
@@ -838,22 +884,26 @@ def tam_tarama():
         saatlik_rapor_gonder(guncel)
     except Exception as e:
         print(f"Rapor hatasi: {e}")
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Tarama bitti. Cuzdan=${bakiye_oku():.2f}")
+    print(
+        f"[{datetime.now().strftime('%H:%M:%S')}] Bitti | "
+        f"flip={n_flip} pullback={n_pull} aday={n_sinyal} | Cuzdan=${bakiye_oku():.2f}"
+    )
     return guncel
 
 
 if __name__ == "__main__":
     acilis_mesaji_goster()
     telegram_mesaj(
-        f"🚀 <b>Vadeli Sanal Bot v16.1</b>\n\n"
+        f"🚀 <b>Vadeli Sanal Bot v16.2</b>\n\n"
         f"📂 <code>{DOSYA_ADI}</code>\n"
         f"💰 Cüzdan: <b>${ILK_BAKIYE:.0f}</b>\n"
         f"🔒 Marjin: <b>${MARJIN_USD:.0f} İZOLE</b>\n"
         f"🛡 SL risk: <b>${RISK_USD:.0f}</b> | 🎯 TP: <b>${TP_USD:.0f}</b> (1:3)\n"
         f"⚡ {KALDIRAC}x | TF: 1H | SuperTrend+RSI\n"
+        f"📌 Giriş: <b>ST flip VEYA çizgiye dönüş (pullback)</b>\n"
+        f"⏱ Cooldown: {SIGNAL_COOLDOWN_MINUTES} dk | Hacim ≥ %{int(VOLUME_MIN_RATIO*100)}\n"
         f"📋 {len(HEDEF_COINLER)} USDT-SWAP coin\n"
-        f"📊 Grafik: <b>Giriş / SL / TP + Fib etiketli</b>\n"
-        f"🧪 Baslangicta test grafiği gonderilir"
+        f"📊 Grafik: Giriş/SL/TP + Fib + AL/SAT okları"
     )
     # Sinyal beklemeden ornek grafik (Fib + Giris/SL/TP)
     try:
