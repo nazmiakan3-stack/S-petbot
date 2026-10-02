@@ -442,178 +442,232 @@ def saatlik_rapor_gonder(guncel_fiyatlar: dict):
 
 
 def grafik_ciz(df, symbol, yon, skor, info=None, giris=None, stop=None, hedef=None):
+    """Mum + ST + RSI + Giris/SL/TP + Fib. Hata olursa detay loglar."""
     with matplotlib_lock:
         try:
             if df is None or len(df) < 50:
+                print("Grafik: df yetersiz")
                 return None
-            df_plot = df.copy().sort_index(ascending=True).tail(120)
+
+            df_plot = df.copy().sort_index(ascending=True).tail(100)
             df_plot = df_plot.rename(columns={
                 "open": "Open", "high": "High", "low": "Low",
                 "close": "Close", "volume": "Volume",
             })
+            # NaN temizle
+            df_plot = df_plot.dropna(subset=["Open", "High", "Low", "Close"])
+            if len(df_plot) < 40:
+                print("Grafik: dropna sonrasi yetersiz")
+                return None
+
             close = df_plot["Close"]
             high = df_plot["High"]
             low = df_plot["Low"]
-            volume = df_plot["Volume"]
-
-            ema21 = ta.ema(close, length=21)
-            ma50 = ta.sma(close, length=50)
-            rsi = ta.rsi(close, length=14)
-            vol_ma14 = volume.rolling(14).mean()
-
-            st = ta.supertrend(high, low, close, length=ST_LENGTH, multiplier=ST_MULT)
-            st_line = None
-            if st is not None:
-                for c in st.columns:
-                    cs = str(c)
-                    if cs.startswith("SUPERT_") and "SUPERTd" not in cs and "SUPERTl" not in cs and "SUPERTs" not in cs:
-                        st_line = st[c]
-                        break
-                if st_line is None and len(st.columns):
-                    st_line = st.iloc[:, 0]
-
-            macd_df = ta.macd(close, fast=12, slow=26, signal=9)
-            macd_line = macd_df.iloc[:, 0] if macd_df is not None else None
-            macd_hist = macd_df.iloc[:, 1] if macd_df is not None else None
-            macd_signal = macd_df.iloc[:, 2] if macd_df is not None else None
 
             addplots = []
-            if ema21 is not None:
-                addplots.append(mpf.make_addplot(ema21, color="#ff9800", width=1.2, panel=0))
-            if ma50 is not None:
-                addplots.append(mpf.make_addplot(ma50, color="#1e88e5", width=1.3, panel=0))
-            if st_line is not None:
-                addplots.append(mpf.make_addplot(st_line, color="#26a69a", width=1.8, panel=0))
 
-            addplots.append(mpf.make_addplot(volume, type="bar", color="#90caf9", panel=1, ylabel="Vol"))
-            if vol_ma14 is not None:
-                addplots.append(mpf.make_addplot(vol_ma14, color="#e91e63", width=1.0, panel=1))
+            # EMA / MA
+            try:
+                ema21 = ta.ema(close, length=21)
+                if ema21 is not None and ema21.notna().sum() > 5:
+                    addplots.append(mpf.make_addplot(ema21, color="#ff9800", width=1.2, panel=0))
+            except Exception:
+                pass
+            try:
+                ma50 = ta.sma(close, length=50)
+                if ma50 is not None and ma50.notna().sum() > 5:
+                    addplots.append(mpf.make_addplot(ma50, color="#1e88e5", width=1.3, panel=0))
+            except Exception:
+                pass
 
-            if rsi is not None:
-                addplots.append(mpf.make_addplot(rsi, color="#9c27b0", width=1.2, panel=2, ylabel="RSI"))
-                addplots.append(mpf.make_addplot(pd.Series(70, index=df_plot.index), color="red", width=0.6, linestyle="--", panel=2))
-                addplots.append(mpf.make_addplot(pd.Series(30, index=df_plot.index), color="green", width=0.6, linestyle="--", panel=2))
+            # SuperTrend
+            try:
+                st = ta.supertrend(high, low, close, length=ST_LENGTH, multiplier=ST_MULT)
+                st_line = None
+                if st is not None and not st.empty:
+                    for c in st.columns:
+                        cs = str(c)
+                        if cs.startswith("SUPERT_") and "SUPERTd" not in cs and "SUPERTl" not in cs and "SUPERTs" not in cs:
+                            st_line = st[c]
+                            break
+                    if st_line is None:
+                        st_line = st.iloc[:, 0]
+                    st_line = st_line.reindex(df_plot.index)
+                    if st_line.notna().sum() > 5:
+                        addplots.append(mpf.make_addplot(st_line, color="#26a69a", width=1.6, panel=0))
+            except Exception as e:
+                print(f"ST addplot: {e}")
 
-            if macd_line is not None:
-                addplots.append(mpf.make_addplot(macd_line, color="#2196f3", width=1.0, panel=3, ylabel="MACD"))
-            if macd_signal is not None:
-                addplots.append(mpf.make_addplot(macd_signal, color="#ff5722", width=1.0, panel=3))
-            if macd_hist is not None:
-                colors = ["#26a69a" if v >= 0 else "#ef5350" for v in macd_hist.fillna(0)]
-                addplots.append(mpf.make_addplot(macd_hist, type="bar", color=colors, panel=3))
+            # RSI panel 1
+            try:
+                rsi = ta.rsi(close, length=14)
+                if rsi is not None and rsi.notna().sum() > 5:
+                    addplots.append(mpf.make_addplot(rsi, color="#9c27b0", width=1.2, panel=1, ylabel="RSI"))
+                    addplots.append(mpf.make_addplot(
+                        pd.Series(70.0, index=df_plot.index), color="red", width=0.6, linestyle="--", panel=1))
+                    addplots.append(mpf.make_addplot(
+                        pd.Series(30.0, index=df_plot.index), color="green", width=0.6, linestyle="--", panel=1))
+            except Exception as e:
+                print(f"RSI addplot: {e}")
 
-            # Giris / SL / TP + Fibonacci
-            hlines = {"hlines": [], "colors": [], "linestyle": [], "linewidths": [], "alpha": 0.9}
-            if giris is not None:
-                hlines["hlines"].append(giris)
-                hlines["colors"].append("#2196f3")
-                hlines["linestyle"].append("-")
-                hlines["linewidths"].append(1.8)
-            if stop is not None:
-                hlines["hlines"].append(stop)
-                hlines["colors"].append("#f44336")
-                hlines["linestyle"].append("-")
-                hlines["linewidths"].append(1.8)
-            if hedef is not None:
-                hlines["hlines"].append(hedef)
-                hlines["colors"].append("#4caf50")
-                hlines["linestyle"].append("-")
-                hlines["linewidths"].append(1.8)
+            # Giris / SL / TP + Fib (sadece sonlu degerler)
+            h_vals, h_cols, h_styles, h_widths = [], [], [], []
+
+            def _hl(val, color, style="-", width=1.6):
+                if val is None:
+                    return
+                try:
+                    v = float(val)
+                except Exception:
+                    return
+                if not np.isfinite(v):
+                    return
+                h_vals.append(v)
+                h_cols.append(color)
+                h_styles.append(style)
+                h_widths.append(width)
+
+            _hl(giris, "#2196f3", "-", 2.0)
+            _hl(stop, "#f44336", "-", 2.0)
+            _hl(hedef, "#4caf50", "-", 2.0)
 
             fib_levels = (info or {}).get("fib_levels") or {}
             fib_colors = {
-                0.236: "#9e9e9e", 0.382: "#ff9800", 0.5: "#2196f3",
-                0.618: "#4caf50", 0.786: "#e91e63", 0.886: "#9c27b0",
+                0.236: "#9e9e9e", 0.382: "#ff9800", 0.5: "#42a5f5",
+                0.618: "#66bb6a", 0.786: "#e91e63", 0.886: "#9c27b0",
             }
             for ratio, level in fib_levels.items():
-                if level and np.isfinite(level):
-                    hlines["hlines"].append(level)
-                    hlines["colors"].append(fib_colors.get(ratio, "#757575"))
-                    hlines["linestyle"].append("--")
-                    hlines["linewidths"].append(0.9)
+                _hl(level, fib_colors.get(ratio, "#757575"), "--", 0.9)
+
+            hlines = None
+            if h_vals:
+                hlines = {
+                    "hlines": h_vals,
+                    "colors": h_cols,
+                    "linestyle": h_styles,
+                    "linewidths": h_widths,
+                    "alpha": 0.9,
+                }
 
             dosya_adi = f"{symbol.replace('-', '_')}_chart.png"
             dosya = os.path.join(ARTIFACT_DIR, dosya_adi)
+            os.makedirs(ARTIFACT_DIR, exist_ok=True)
+
             mc = mpf.make_marketcolors(
                 up="#26a69a", down="#ef5350", edge="inherit",
-                wick={"up": "#26a69a", "down": "#ef5350"}, volume="in",
+                wick={"up": "#26a69a", "down": "#ef5350"},
             )
-            s = mpf.make_mpf_style(base_mpf_style="yahoo", marketcolors=mc, facecolor="white", gridstyle=":")
-            fig, axes = mpf.plot(
-                df_plot, type="candle", style=s, addplot=addplots if addplots else None,
-                hlines=hlines if hlines["hlines"] else None,
-                title=f"{symbol} | {yon} | ST+RSI | İZOLE ${MARJIN_USD:.0f}",
-                returnfig=True, volume=False, figsize=(14, 11),
-                panel_ratios=(0, 5, 1.2, 1.2, 1.2), tight_layout=True,
+            style = mpf.make_mpf_style(
+                base_mpf_style="yahoo", marketcolors=mc,
+                facecolor="white", gridstyle=":",
             )
-            ax = axes[0]
+
+            # panel 0 = fiyat, panel 1 = RSI  → 2 panel
+            kwargs = dict(
+                type="candle",
+                style=style,
+                title=f"{symbol} | {yon} | ST+RSI | Giriş/SL/TP/Fib",
+                returnfig=True,
+                volume=False,
+                figsize=(12, 8),
+                panel_ratios=(3.5, 1.2),
+                tight_layout=True,
+            )
+            if addplots:
+                kwargs["addplot"] = addplots
+            if hlines:
+                kwargs["hlines"] = hlines
+
+            fig, axes = mpf.plot(df_plot, **kwargs)
+            ax = axes[0] if isinstance(axes, (list, np.ndarray)) else axes
+
             ax.annotate(
-                f"{'▲ LONG' if yon == 'LONG' else '▼ SHORT'} | Giriş / SL / TP + Fib",
-                xy=(0.02, 0.96), xycoords="axes fraction", fontsize=11,
+                f"{'▲ LONG' if yon == 'LONG' else '▼ SHORT'}",
+                xy=(0.02, 0.96), xycoords="axes fraction", fontsize=12,
                 color="#26a69a" if yon == "LONG" else "#ef5350", fontweight="bold",
             )
-            # Sag kenarda net etiketler: GIRIS / SL / TP / Fib
+
+            # Sag etiketler
             x_right = len(df_plot) - 1
+
             def _etiket(y, text, color):
-                if y is None or not np.isfinite(y):
+                if y is None:
+                    return
+                try:
+                    y = float(y)
+                except Exception:
+                    return
+                if not np.isfinite(y):
                     return
                 ax.annotate(
-                    text, xy=(x_right, y), xytext=(8, 0),
+                    text, xy=(x_right, y), xytext=(6, 0),
                     textcoords="offset points", fontsize=8, color=color,
                     fontweight="bold", va="center",
-                    bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=color, alpha=0.85),
+                    bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=color, alpha=0.9),
                 )
-            if giris is not None:
-                _etiket(giris, f"GİRİŞ {giris:.4f}", "#2196f3")
-            if stop is not None:
-                _etiket(stop, f"SL {stop:.4f}", "#f44336")
-            if hedef is not None:
-                _etiket(hedef, f"TP {hedef:.4f}", "#4caf50")
-            for ratio, level in fib_levels.items():
-                if level and np.isfinite(level):
-                    _etiket(level, f"Fib {ratio}", fib_colors.get(ratio, "#757575"))
 
-            fig.savefig(dosya, dpi=120, bbox_inches="tight", facecolor="white")
+            if giris is not None:
+                _etiket(giris, f"GİRİŞ {float(giris):.4f}", "#2196f3")
+            if stop is not None:
+                _etiket(stop, f"SL {float(stop):.4f}", "#f44336")
+            if hedef is not None:
+                _etiket(hedef, f"TP {float(hedef):.4f}", "#4caf50")
+            for ratio, level in fib_levels.items():
+                _etiket(level, f"Fib{ratio}", fib_colors.get(ratio, "#757575"))
+
+            fig.savefig(dosya, dpi=110, bbox_inches="tight", facecolor="white")
             plt.close(fig)
-            return dosya
+            if os.path.exists(dosya) and os.path.getsize(dosya) > 1000:
+                return dosya
+            print(f"Grafik dosya bos/kucuk: {dosya}")
+            return None
         except Exception as e:
             plt.close("all")
+            import traceback
             print(f"Grafik hatasi: {e}")
+            traceback.print_exc()
             return None
 
 
 def test_grafik_gonder():
-    """Sinyal olmasa bile BTC ile ornek grafik (Giris/SL/TP + Fib) Telegram'a gider."""
+    """Sinyal olmasa bile BTC ile ornek grafik Telegram'a gider."""
     try:
         symbol = "BTC-USDT-SWAP"
         df = veri_cek(symbol, "1H", 250)
         if df is None or len(df) < 60:
-            telegram_mesaj("⚠️ Test grafik: BTC verisi alinamadi")
+            # Spot fallback
+            df = veri_cek("BTC-USDT", "1H", 250)
+            symbol = "BTC-USDT" if df is not None else symbol
+        if df is None or len(df) < 60:
+            telegram_mesaj("⚠️ Test grafik: mum verisi alinamadi (OKX)")
             return
-        info = basit_analiz(df)
-        fiyat = info.get("fiyat") or float(df["close"].iloc[-1])
-        atr = info.get("atr") or fiyat * 0.01
+        info = basit_analiz(df) or {}
+        fiyat = float(info.get("fiyat") or df["close"].iloc[-1])
+        atr = float(info.get("atr") or fiyat * 0.01)
         stop = fiyat - atr * ATR_SL_MULT
         hedef = fiyat + atr * ATR_TP_MULT
         foto = grafik_ciz(df, symbol, "LONG", 0.0, info, giris=fiyat, stop=stop, hedef=hedef)
-        if foto:
+        if foto and os.path.exists(foto):
             telegram_foto(
                 foto,
-                f"🧪 <b>TEST GRAFİK</b> (sinyal degil)\n"
+                f"🧪 <b>TEST GRAFİK</b> (sinyal değil)\n"
                 f"📂 <code>{DOSYA_ADI}</code>\n"
                 f"🪙 {symbol} | 1H\n"
                 f"💰 GİRİŞ: {fiyat:.4f}\n"
                 f"🛡 SL: {stop:.4f}\n"
                 f"🎯 TP: {hedef:.4f}\n"
-                f"📐 Fib + ST + RSI aktif\n"
+                f"📐 Fib + ST + RSI\n"
                 f"📎 <code>{os.path.basename(foto)}</code>",
             )
             print(f"Test grafik gonderildi: {foto}")
         else:
-            telegram_mesaj("⚠️ Test grafik cizilemedi")
+            telegram_mesaj(
+                "⚠️ Test grafik cizilemedi.\n"
+                "screen -r S_petbot ile 'Grafik hatasi' satirina bak."
+            )
     except Exception as e:
         print(f"Test grafik hatasi: {e}")
-        telegram_mesaj(f"⚠️ Test grafik hatasi: {e}")
+        telegram_mesaj(f"⚠️ Test grafik hatasi: <code>{e}</code>")
 
 
 def telegram_gonder(symbol, skor, fiyat, df, yon, info):
