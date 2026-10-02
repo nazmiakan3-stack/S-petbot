@@ -480,21 +480,52 @@ def grafik_ciz(df, symbol, yon, skor, info=None, giris=None, stop=None, hedef=No
             except Exception:
                 pass
 
-            # SuperTrend
+            # SuperTrend cizgisi + AL / SAT isaretleri (TV gibi)
             try:
                 st = ta.supertrend(high, low, close, length=ST_LENGTH, multiplier=ST_MULT)
                 st_line = None
+                st_dir = None
                 if st is not None and not st.empty:
                     for c in st.columns:
                         cs = str(c)
-                        if cs.startswith("SUPERT_") and "SUPERTd" not in cs and "SUPERTl" not in cs and "SUPERTs" not in cs:
+                        if cs.startswith("SUPERTd"):
+                            st_dir = st[c]
+                        elif cs.startswith("SUPERT_") and "SUPERTd" not in cs and "SUPERTl" not in cs and "SUPERTs" not in cs:
                             st_line = st[c]
-                            break
                     if st_line is None:
                         st_line = st.iloc[:, 0]
+                    if st_dir is None and len(st.columns) >= 2:
+                        st_dir = st.iloc[:, 1]
                     st_line = st_line.reindex(df_plot.index)
-                    if st_line.notna().sum() > 5:
+                    if st_dir is not None:
+                        st_dir = st_dir.reindex(df_plot.index)
+                    if st_line is not None and st_line.notna().sum() > 5:
                         addplots.append(mpf.make_addplot(st_line, color="#26a69a", width=1.6, panel=0))
+
+                    # AL / SAT noktalari: yon degisimi
+                    if st_dir is not None and st_dir.notna().sum() > 5:
+                        buy_marks = pd.Series(np.nan, index=df_plot.index)
+                        sell_marks = pd.Series(np.nan, index=df_plot.index)
+                        d = st_dir.fillna(0).values
+                        lows = low.values
+                        highs = high.values
+                        for i in range(1, len(d)):
+                            prev, cur = d[i - 1], d[i]
+                            # SUPERTd: 1 = bullish (AL), -1 = bearish (SAT)
+                            if prev < 0 and cur > 0:
+                                buy_marks.iloc[i] = lows[i] * 0.997  # mum altina
+                            elif prev > 0 and cur < 0:
+                                sell_marks.iloc[i] = highs[i] * 1.003  # mum ustune
+                        if buy_marks.notna().sum() > 0:
+                            addplots.append(mpf.make_addplot(
+                                buy_marks, type="scatter", markersize=80,
+                                marker="^", color="#00c853", panel=0,
+                            ))
+                        if sell_marks.notna().sum() > 0:
+                            addplots.append(mpf.make_addplot(
+                                sell_marks, type="scatter", markersize=80,
+                                marker="v", color="#d50000", panel=0,
+                            ))
             except Exception as e:
                 print(f"ST addplot: {e}")
 
@@ -582,8 +613,8 @@ def grafik_ciz(df, symbol, yon, skor, info=None, giris=None, stop=None, hedef=No
             ax = axes[0] if isinstance(axes, (list, np.ndarray)) else axes
 
             ax.annotate(
-                f"{'▲ LONG' if yon == 'LONG' else '▼ SHORT'}",
-                xy=(0.02, 0.96), xycoords="axes fraction", fontsize=12,
+                f"{'▲ LONG' if yon == 'LONG' else '▼ SHORT'}  |  ▲ AL  ▼ SAT (SuperTrend)",
+                xy=(0.02, 0.96), xycoords="axes fraction", fontsize=10,
                 color="#26a69a" if yon == "LONG" else "#ef5350", fontweight="bold",
             )
 
