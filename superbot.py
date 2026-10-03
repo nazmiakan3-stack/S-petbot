@@ -167,7 +167,7 @@ def hacim_yeterli_mi(df: pd.DataFrame):
 
 def supertrend_hesapla(df: pd.DataFrame):
     """Donus: st_line, d_now, st_buy_flip, st_sell_flip
-    Flip son 3 mumda aranir; tepe/dip + ST kirilimina duyarli.
+    Flip, ST kirilim, yerel tepe/dip + ST temas (grafikteki oklarla uyumlu).
     """
     st = ta.supertrend(df["high"], df["low"], df["close"], length=ST_LENGTH, multiplier=ST_MULT)
     if st is None or st.empty:
@@ -188,12 +188,14 @@ def supertrend_hesapla(df: pd.DataFrame):
     st_line = st[line_col]
     st_dir = st[dir_col]
     d_now = float(st_dir.iloc[-1]) if pd.notna(st_dir.iloc[-1]) else 0.0
-
-    # Son 3 mumda yon degisimi (tepe/dip kacmasin)
     st_buy = False
     st_sell = False
-    n = len(st_dir)
-    for i in range(max(1, n - 3), n):
+    n = len(df)
+    if n < 5:
+        return st_line, d_now, False, False
+
+    # Son 4 mum tarama
+    for i in range(max(1, n - 4), n):
         d0 = float(st_dir.iloc[i - 1]) if pd.notna(st_dir.iloc[i - 1]) else 0.0
         d1 = float(st_dir.iloc[i]) if pd.notna(st_dir.iloc[i]) else 0.0
         if d0 <= 0 and d1 > 0:
@@ -201,31 +203,37 @@ def supertrend_hesapla(df: pd.DataFrame):
         if d0 >= 0 and d1 < 0:
             st_sell = True
 
-    # Fiyat ST cizgisini kirdi (close cross) — son 2 mum
-    if len(df) >= 2 and st_line is not None:
-        line_now = float(st_line.iloc[-1]) if pd.notna(st_line.iloc[-1]) else None
-        line_prev = float(st_line.iloc[-2]) if pd.notna(st_line.iloc[-2]) else line_now
-        if line_now is not None and line_prev is not None:
-            c0, c1 = float(df["close"].iloc[-2]), float(df["close"].iloc[-1])
-            if c0 < line_prev and c1 >= line_now:
+        ln = float(st_line.iloc[i]) if pd.notna(st_line.iloc[i]) else None
+        lp = float(st_line.iloc[i - 1]) if pd.notna(st_line.iloc[i - 1]) else ln
+        c0 = float(df["close"].iloc[i - 1])
+        c1 = float(df["close"].iloc[i])
+        o1 = float(df["open"].iloc[i])
+        lo1 = float(df["low"].iloc[i])
+        hi1 = float(df["high"].iloc[i])
+        if ln is not None and lp is not None:
+            if c0 < lp and c1 >= ln:
                 st_buy = True
-            if c0 > line_prev and c1 <= line_now:
+            if c0 > lp and c1 <= ln:
+                st_sell = True
+            # ST temas + yesil/kirmizi mum
+            if d1 > 0 and lo1 <= ln * 1.002 and c1 >= ln and c1 >= o1:
+                st_buy = True
+            if d1 < 0 and hi1 >= ln * 0.998 and c1 <= ln and c1 <= o1:
                 st_sell = True
 
-    # Yerel dip/tepe + ST hizasi (son 5 mum)
-    if len(df) >= 6 and st_line is not None and pd.notna(st_line.iloc[-1]):
+    # Yerel dip/tepe (son bar merkez, 3 mum kanat)
+    if n >= 7 and pd.notna(st_line.iloc[-1]):
+        i = n - 1
         lv = float(st_line.iloc[-1])
-        lows = df["low"].iloc[-5:]
-        highs = df["high"].iloc[-5:]
+        lo = df["low"].values
+        hi = df["high"].values
         c1 = float(df["close"].iloc[-1])
-        # Dip: son low, 5 mumun minimumu ve close ST ustunde
-        if float(df["low"].iloc[-1]) <= float(lows.min()) * 1.001 and c1 >= lv:
-            if d_now > 0 or c1 > lv:
-                st_buy = True
-        # Tepe: son high, 5 mumun maksimumu ve close ST altinda
-        if float(df["high"].iloc[-1]) >= float(highs.max()) * 0.999 and c1 <= lv:
-            if d_now < 0 or c1 < lv:
-                st_sell = True
+        o1 = float(df["open"].iloc[-1])
+        w0 = max(0, i - 3)
+        if lo[i] <= np.min(lo[w0:i + 1]) * 1.0001 and c1 >= lv:
+            st_buy = True
+        if hi[i] >= np.max(hi[w0:i + 1]) * 0.9999 and c1 <= lv:
+            st_sell = True
 
     return st_line, d_now, st_buy, st_sell
 
@@ -620,7 +628,7 @@ def grafik_ciz(df, symbol, yon, skor, info=None, giris=None, stop=None, hedef=No
             except Exception:
                 pass
 
-            # SuperTrend: yesil = AL bolgesi, kirmizi = SAT bolgesi + buyuk AL/SAT oklar
+            # SuperTrend: yesil/kirmizi cizgi + tepe/dip AL-SAT oklar (TV benzeri)
             try:
                 st = ta.supertrend(high, low, close, length=ST_LENGTH, multiplier=ST_MULT)
                 st_line = None
@@ -641,48 +649,87 @@ def grafik_ciz(df, symbol, yon, skor, info=None, giris=None, stop=None, hedef=No
                         st_dir = st_dir.reindex(df_plot.index)
 
                     if st_line is not None and st_dir is not None and st_line.notna().sum() > 5:
-                        # Iki renkli ST: bullish yesil, bearish kirmizi
                         st_up = st_line.where(st_dir > 0)
                         st_dn = st_line.where(st_dir < 0)
                         if st_up.notna().sum() > 0:
                             addplots.append(mpf.make_addplot(
-                                st_up, color="#00c853", width=2.2, panel=0))
+                                st_up, color="#00c853", width=2.4, panel=0))
                         if st_dn.notna().sum() > 0:
                             addplots.append(mpf.make_addplot(
-                                st_dn, color="#ff1744", width=2.2, panel=0))
+                                st_dn, color="#ff1744", width=2.4, panel=0))
                     elif st_line is not None and st_line.notna().sum() > 5:
                         addplots.append(mpf.make_addplot(
                             st_line, color="#26a69a", width=2.0, panel=0))
 
-                    if st_dir is not None and st_dir.notna().sum() > 5:
-                        buy_marks = pd.Series(np.nan, index=df_plot.index)
-                        sell_marks = pd.Series(np.nan, index=df_plot.index)
-                        d = st_dir.fillna(0).values
+                    # --- AL / SAT isaretleri: flip + ST kirilim + yerel tepe/dip ---
+                    buy_marks = pd.Series(np.nan, index=df_plot.index)
+                    sell_marks = pd.Series(np.nan, index=df_plot.index)
+                    if st_line is not None:
+                        st_vals = st_line.ffill().values
+                        d_vals = (st_dir.ffill().fillna(0).values if st_dir is not None
+                                  else np.zeros(len(df_plot)))
                         lows = low.values
                         highs = high.values
                         closes = close.values
-                        st_vals = st_line.fillna(method="ffill").values if st_line is not None else None
-                        for i in range(1, len(d)):
-                            prev, cur = float(d[i - 1]), float(d[i])
-                            # Klasik flip
-                            if prev <= 0 and cur > 0:
-                                buy_marks.iloc[i] = lows[i] * 0.994
-                            elif prev >= 0 and cur < 0:
-                                sell_marks.iloc[i] = highs[i] * 1.006
-                            # Close ile ST kirilimi (tepe/dip kacmasin)
-                            if st_vals is not None and i >= 1:
-                                if closes[i - 1] < st_vals[i - 1] and closes[i] >= st_vals[i]:
-                                    buy_marks.iloc[i] = lows[i] * 0.994
-                                if closes[i - 1] > st_vals[i - 1] and closes[i] <= st_vals[i]:
-                                    sell_marks.iloc[i] = highs[i] * 1.006
+                        opens = df_plot["Open"].values
+                        n = len(closes)
+                        pivot = 3  # yerel tepe/dip penceresi
+
+                        for i in range(1, n):
+                            prev_d, cur_d = float(d_vals[i - 1]), float(d_vals[i])
+                            st_i = float(st_vals[i]) if np.isfinite(st_vals[i]) else None
+                            st_p = float(st_vals[i - 1]) if np.isfinite(st_vals[i - 1]) else st_i
+
+                            # 1) Klasik SuperTrend flip
+                            if prev_d <= 0 and cur_d > 0:
+                                buy_marks.iloc[i] = lows[i] * 0.993
+                            if prev_d >= 0 and cur_d < 0:
+                                sell_marks.iloc[i] = highs[i] * 1.007
+
+                            # 2) Close ST cizgisini kiriyor
+                            if st_i is not None and st_p is not None:
+                                if closes[i - 1] < st_p and closes[i] >= st_i:
+                                    buy_marks.iloc[i] = lows[i] * 0.993
+                                if closes[i - 1] > st_p and closes[i] <= st_i:
+                                    sell_marks.iloc[i] = highs[i] * 1.007
+
+                            # 3) Yerel DIP + ST yakin / ustunde → AL
+                            #    Yerel TEPE + ST yakin / altinda → SAT
+                            if i >= pivot and i < n - 1 and st_i is not None:
+                                w0, w1 = i - pivot, i + pivot + 1
+                                w1 = min(w1, n)
+                                loc_low = lows[i] <= np.min(lows[w0:w1]) * 1.0001
+                                loc_high = highs[i] >= np.max(highs[w0:w1]) * 0.9999
+                                atr_est = max(np.mean(highs[max(0, i - 14):i + 1] - lows[max(0, i - 14):i + 1]), closes[i] * 0.005)
+                                near_st = abs(lows[i] - st_i) <= atr_est * 0.8 or abs(highs[i] - st_i) <= atr_est * 0.8
+                                touch_st = lows[i] <= st_i * 1.002 and closes[i] >= st_i
+                                reject_st = highs[i] >= st_i * 0.998 and closes[i] <= st_i
+
+                                # Yesil ST bolgesinde dip / ST'ye donus AL
+                                if loc_low and (cur_d > 0 or closes[i] >= st_i) and (near_st or touch_st or lows[i] <= st_i):
+                                    if closes[i] >= opens[i] or closes[i] >= st_i:
+                                        buy_marks.iloc[i] = lows[i] * 0.992
+
+                                # Kirmizi ST bolgesinde tepe / ST red SAT
+                                if loc_high and (cur_d < 0 or closes[i] <= st_i) and (near_st or reject_st or highs[i] >= st_i):
+                                    if closes[i] <= opens[i] or closes[i] <= st_i:
+                                        sell_marks.iloc[i] = highs[i] * 1.008
+
+                                # Trend ici: ST bullish iken fiyat ST'ye deydi ve yesil mum
+                                if cur_d > 0 and touch_st and closes[i] > opens[i]:
+                                    buy_marks.iloc[i] = lows[i] * 0.992
+                                # Trend ici: ST bearish iken fiyat ST'ye deydi ve kirmizi mum
+                                if cur_d < 0 and reject_st and closes[i] < opens[i]:
+                                    sell_marks.iloc[i] = highs[i] * 1.008
+
                         if buy_marks.notna().sum() > 0:
                             addplots.append(mpf.make_addplot(
-                                buy_marks, type="scatter", markersize=130,
+                                buy_marks, type="scatter", markersize=140,
                                 marker="^", color="#00e676", panel=0,
                             ))
                         if sell_marks.notna().sum() > 0:
                             addplots.append(mpf.make_addplot(
-                                sell_marks, type="scatter", markersize=130,
+                                sell_marks, type="scatter", markersize=140,
                                 marker="v", color="#ff1744", panel=0,
                             ))
             except Exception as e:
