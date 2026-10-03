@@ -60,18 +60,23 @@ TP_USD = 30.0              # TP kar (3R)
 KALDIRAC = 5
 POZISYON_USD = MARJIN_USD * KALDIRAC  # 75 USDT notional
 
-SIGNAL_COOLDOWN_MINUTES = 15   # onceki 35 → daha sik sinyal
+SIGNAL_COOLDOWN_MINUTES = 12
 HOURLY_REPORT_MINUTES = 60
 
 VOLUME_MA_LENGTH = 20
-VOLUME_MIN_RATIO = 0.25        # onceki 0.35 → gevsetildi
+VOLUME_MIN_RATIO = 0.15        # hacim esigi dusuk — tepe/dip kacmasin
 
 ST_LENGTH = 10
 ST_MULT = 3.0
 RSI_LONG_MAX = 70.0
 RSI_SHORT_MIN = 30.0
-# ST cizgisine donus (pullback) toleransi: ATR'nin yuzdesi
-ST_TOUCH_ATR_FRAC = 0.35
+ST_TOUCH_ATR_FRAC = 0.40
+
+# StochRSI: dipler (asiri satim) / tepeler (asiri alim)
+STOCH_RSI_LEN = 14
+STOCH_RSI_OVERSOLD = 20.0      # asiri satim → LONG icin (dip)
+STOCH_RSI_OVERBOUGHT = 80.0    # asiri alim → SHORT icin (tepe)
+MIN_SKOR = 15.0                 # giris icin minimum skor
 
 ATR_SL_MULT = 1.0
 ATR_TP_MULT = 3.0
@@ -348,16 +353,60 @@ def basit_analiz(df: pd.DataFrame) -> dict:
             if high_son >= st_line_val - tol:
                 st_pullback_short = True
 
+    # StochRSI (tepe / dip)
+    stoch_k = stoch_d = 50.0
+    stoch_oversold = stoch_overbought = False
+    stoch_cross_up = stoch_cross_down = False
+    try:
+        sr = ta.stochrsi(df["close"], length=STOCH_RSI_LEN, rsi_length=STOCH_RSI_LEN, k=3, d=3)
+        if sr is not None and not sr.empty:
+            # kolonlar: STOCHRSIk_... STOCHRSId_...
+            k_col = d_col = None
+            for c in sr.columns:
+                cs = str(c).lower()
+                if "stochrsik" in cs or cs.endswith("k"):
+                    if k_col is None:
+                        k_col = c
+                if "stochrsid" in cs or (cs.endswith("d") and "stoch" in cs):
+                    d_col = c
+            if k_col is None:
+                k_col = sr.columns[0]
+            if d_col is None and len(sr.columns) > 1:
+                d_col = sr.columns[1]
+            stoch_k = float(sr[k_col].iloc[-1]) if pd.notna(sr[k_col].iloc[-1]) else 50.0
+            stoch_d = float(sr[d_col].iloc[-1]) if d_col and pd.notna(sr[d_col].iloc[-1]) else stoch_k
+            k_prev = float(sr[k_col].iloc[-2]) if len(sr) > 1 and pd.notna(sr[k_col].iloc[-2]) else stoch_k
+            d_prev = float(sr[d_col].iloc[-2]) if d_col and len(sr) > 1 and pd.notna(sr[d_col].iloc[-2]) else stoch_d
+            # pandas_ta stochrsi bazen 0-1 araliginda — 0-100'e cevir
+            if stoch_k <= 1.5 and stoch_d <= 1.5:
+                stoch_k *= 100.0
+                stoch_d *= 100.0
+                k_prev *= 100.0
+                d_prev *= 100.0
+            stoch_oversold = stoch_k <= STOCH_RSI_OVERSOLD
+            stoch_overbought = stoch_k >= STOCH_RSI_OVERBOUGHT
+            stoch_cross_up = (k_prev <= d_prev and stoch_k > stoch_d and stoch_k < 40)
+            stoch_cross_down = (k_prev >= d_prev and stoch_k < stoch_d and stoch_k > 60)
+    except Exception as e:
+        print(f"StochRSI: {e}")
+
     st_buy = bool(st_buy_flip or st_pullback_long)
     st_sell = bool(st_sell_flip or st_pullback_short)
+
+    # ANA KURAL (tepe/dip):
+    # LONG  = SuperTrend AL  + StochRSI asiri satim (dip) veya alttan kesişim
+    # SHORT = SuperTrend SAT + StochRSI asiri alim (tepe) veya ustten kesişim
+    long_ok = st_buy and (stoch_oversold or stoch_cross_up)
+    short_ok = st_sell and (stoch_overbought or stoch_cross_down)
+
     sinyal_tipi = ""
-    if st_buy_flip:
+    if long_ok:
+        sinyal_tipi = "ST_AL+StochDIP"
+    elif short_ok:
+        sinyal_tipi = "ST_SAT+StochTEPE"
+    elif st_buy_flip:
         sinyal_tipi = "FLIP"
-    elif st_pullback_long:
-        sinyal_tipi = "PULLBACK"
-    if st_sell_flip:
-        sinyal_tipi = "FLIP"
-    elif st_pullback_short:
+    elif st_pullback_long or st_pullback_short:
         sinyal_tipi = "PULLBACK"
 
     look = min(80, len(df))
@@ -381,6 +430,12 @@ def basit_analiz(df: pd.DataFrame) -> dict:
         "st_sell_flip": bool(st_sell_flip),
         "st_pullback_long": st_pullback_long,
         "st_pullback_short": st_pullback_short,
+        "long_ok": long_ok,
+        "short_ok": short_ok,
+        "stoch_k": stoch_k,
+        "stoch_d": stoch_d,
+        "stoch_oversold": stoch_oversold,
+        "stoch_overbought": stoch_overbought,
         "sinyal_tipi": sinyal_tipi,
         "rsi_ok_long": rsi_val < RSI_LONG_MAX,
         "rsi_ok_short": rsi_val > RSI_SHORT_MIN,
@@ -398,21 +453,28 @@ def analiz_yap(symbol: str):
     info = basit_analiz(df)
     if not info:
         return 0.0, None, "YOK", None, None
-    if info.get("st_buy") and not info.get("st_sell"):
+
+    # Yon: SADECE ST + StochRSI uyumu
+    if info.get("long_ok"):
         yon = "LONG"
-    elif info.get("st_sell") and not info.get("st_buy"):
+    elif info.get("short_ok"):
         yon = "SHORT"
     else:
         yon = "YOK"
+
     skor = 0.0
     if info.get("st_buy_flip") or info.get("st_sell_flip"):
-        skor += 7.0
+        skor += 8.0
     if info.get("st_pullback_long") or info.get("st_pullback_short"):
         skor += 5.0
+    if info.get("stoch_oversold") or info.get("stoch_overbought"):
+        skor += 6.0
+    if info.get("long_ok") or info.get("short_ok"):
+        skor += 4.0  # cift onay bonusu → toplam kolayca >= 15
     if info.get("rsi_ok_long") and yon == "LONG":
-        skor += 2.0
+        skor += 1.5
     if info.get("rsi_ok_short") and yon == "SHORT":
-        skor += 2.0
+        skor += 1.5
     return skor, info["fiyat"], yon, info, df
 
 
@@ -556,12 +618,17 @@ def saatlik_rapor_gonder(guncel_fiyatlar: dict):
 
     pozisyonlar = acik_pozisyonlari_listele()
     bakiye = bakiye_oku()
+    kar_zarar = bakiye - ILK_BAKIYE
+    kz_emoji = "🟢 KÂR" if kar_zarar >= 0 else "🔴 ZARAR"
     mesaj = (
-        f"📋 <b>VADELİ SAATLİK PnL</b>\n"
+        f"📋 <b>VADELİ SAATLİK RAPOR</b>\n"
         f"🕒 {now.strftime('%Y-%m-%d %H:%M')}\n"
-        f"📂 <code>{DOSYA_ADI}</code>\n"
+        f"📂 Dosya: <code>{DOSYA_ADI}</code>\n"
         f"💰 Cüzdan: <b>${bakiye:.2f}</b> / ${ILK_BAKIYE:.0f}\n"
-        f"🔒 Marjin/poz: ${MARJIN_USD:.0f} İZOLE | Risk ${RISK_USD:.0f}\n\n"
+        f"{kz_emoji}: <b>${kar_zarar:+.2f}</b> "
+        f"(%{(kar_zarar / ILK_BAKIYE * 100):+.2f})\n"
+        f"🔒 Marjin ${MARJIN_USD:.0f} İZOLE | Risk ${RISK_USD:.0f}\n"
+        f"📌 Strateji: ST AL/SAT + StochRSI dip/tepe | Skor≥{MIN_SKOR:.0f}\n\n"
     )
     if not pozisyonlar:
         mesaj += "Açık pozisyon yok.\n"
@@ -578,14 +645,20 @@ def saatlik_rapor_gonder(guncel_fiyatlar: dict):
                 r_mult = (giris - anlik) / risk_px
             pnl_usd = r_mult * RISK_USD
             toplam += pnl_usd
+            durum = "KÂR" if pnl_usd >= 0 else "ZARAR"
             emoji = "🟢" if pnl_usd >= 0 else "🔴"
             mesaj += (
-                f"\n• <b>{coin}</b> {yon} İZOLE\n"
+                f"\n• <b>{coin}</b> {yon}\n"
                 f"  Giriş {giris:.6f} | Anlık {anlik:.6f}\n"
-                f"  {emoji} PnL: <b>${pnl_usd:+.2f}</b> ({r_mult:+.2f}R)\n"
+                f"  {emoji} <b>{durum}</b>: ${pnl_usd:+.2f} ({r_mult:+.2f}R)\n"
                 f"  📎 <code>{grafik or 'Yok'}</code>\n"
             )
-        mesaj += f"\n────────────────\n📊 Toplam açık PnL: <b>${toplam:+.2f}</b>\n"
+        td = "KÂR" if toplam >= 0 else "ZARAR"
+        mesaj += (
+            f"\n────────────────\n"
+            f"📊 Açık pozisyonlar toplam <b>{td}</b>: <b>${toplam:+.2f}</b>\n"
+            f"💼 Cüzdan net <b>{kz_emoji}</b>: <b>${kar_zarar:+.2f}</b>\n"
+        )
     telegram_mesaj(mesaj)
 
 
@@ -924,13 +997,17 @@ def telegram_gonder(symbol, skor, fiyat, df, yon, info):
     if last and (now - last) < timedelta(minutes=SIGNAL_COOLDOWN_MINUTES):
         return
 
+    # Zorunlu: ST AL/SAT + StochRSI dip/tepe + skor >= 15
     if yon == "LONG":
-        if not (info and info.get("st_buy") and info.get("rsi_ok_long")):
+        if not (info and info.get("long_ok")):
             return
     elif yon == "SHORT":
-        if not (info and info.get("st_sell") and info.get("rsi_ok_short")):
+        if not (info and info.get("short_ok")):
             return
     else:
+        return
+
+    if skor < MIN_SKOR:
         return
 
     hacim_ok, son_hacim, ort_hacim = hacim_yeterli_mi(df)
@@ -958,21 +1035,24 @@ def telegram_gonder(symbol, skor, fiyat, df, yon, info):
         return
     last_signal_time[symbol] = now
 
-    tip = info.get("sinyal_tipi") or ("FLIP" if (info.get("st_buy_flip") or info.get("st_sell_flip")) else "PULLBACK")
+    tip = info.get("sinyal_tipi") or "ST+StochRSI"
     st_txt = f"{st_line:.6f}" if st_line else "yok"
+    sk = info.get("stoch_k", 0)
+    sd = info.get("stoch_d", 0)
     mesaj = (
         f"⚡ <b>{symbol}</b> — <b>{yon}</b> (VADELİ İZOLE)\n"
-        f"📂 <code>{DOSYA_ADI}</code>\n"
+        f"📂 Dosya: <code>{DOSYA_ADI}</code>\n"
         f"📌 Sinyal: <b>{tip}</b>\n"
-        f"⭐ Skor: {skor:.1f} | RSI: {info.get('rsi', 0):.1f}\n"
+        f"⭐ Skor: <b>{skor:.1f}</b> (≥{MIN_SKOR:.0f})\n"
         f"📐 SuperTrend: {st_txt}\n"
+        f"📊 StochRSI: K={sk:.1f} D={sd:.1f} "
+        f"({'DIP/asiri satim' if info.get('stoch_oversold') else 'TEPE/asiri alim' if info.get('stoch_overbought') else 'nötr'})\n"
         f"🔒 Marjin ${MARJIN_USD:.0f} | Risk ${RISK_USD:.0f} | TP ${TP_USD:.0f}\n"
         f"📈 Hacim: %{(son_hacim / ort_hacim * 100) if ort_hacim else 0:.0f}\n\n"
         f"💰 <b>GİRİŞ:</b> {fiyat:.6f}\n"
         f"🛡 <b>SL (ST+Fib):</b> {stop:.6f}\n"
-        f"🎯 <b>TP (ST+Fib / 3R):</b> {hedef:.6f}\n"
-        f"ℹ️ SL/TP: SuperTrend + Fibonacci destek/direnç\n"
-        f"📎 <code>{dosya_adi}</code>"
+        f"🎯 <b>TP (ST+Fib):</b> {hedef:.6f}\n"
+        f"📎 Grafik: <code>{dosya_adi}</code>"
     )
     if foto:
         telegram_foto(foto, mesaj)
@@ -1050,10 +1130,8 @@ def tam_tarama():
                     n_flip += 1
                 if info.get("st_pullback_long") or info.get("st_pullback_short"):
                     n_pull += 1
-            if df is not None and yon in ("LONG", "SHORT") and info:
-                if (yon == "LONG" and info.get("st_buy") and info.get("rsi_ok_long")) or (
-                    yon == "SHORT" and info.get("st_sell") and info.get("rsi_ok_short")
-                ):
+            if df is not None and yon in ("LONG", "SHORT") and info and skor >= MIN_SKOR:
+                if (yon == "LONG" and info.get("long_ok")) or (yon == "SHORT" and info.get("short_ok")):
                     n_sinyal += 1
                     telegram_gonder(coin, skor, fiyat, df, yon, info)
             time.sleep(0.10)
@@ -1074,15 +1152,14 @@ def tam_tarama():
 if __name__ == "__main__":
     acilis_mesaji_goster()
     telegram_mesaj(
-        f"🚀 <b>Vadeli Sanal Bot v16.4</b>\n\n"
-        f"📂 <code>{DOSYA_ADI}</code>\n"
-        f"💰 Cüzdan: <b>${ILK_BAKIYE:.0f}</b>\n"
-        f"🔒 Marjin: <b>${MARJIN_USD:.0f} İZOLE</b>\n"
-        f"🛡 SL/TP: <b>SuperTrend + Fibonacci</b>\n"
-        f"📌 Giriş: ST flip (3 mum) / kirilim / tepe-dip + pullback\n"
-        f"🟢 ST AL · 🔴 ST SAT · ▲▼ oklar güçlendirildi\n"
-        f"⏱ Cooldown {SIGNAL_COOLDOWN_MINUTES} dk | Hacim ≥ %{int(VOLUME_MIN_RATIO*100)}\n"
-        f"📋 {len(HEDEF_COINLER)} SWAP | TF 1H"
+        f"🚀 <b>Vadeli Sanal Bot v16.5</b>\n\n"
+        f"📂 Dosya: <code>{DOSYA_ADI}</code>\n"
+        f"💰 Cüzdan: <b>${ILK_BAKIYE:.0f}</b> | Marjin ${MARJIN_USD:.0f} İZOLE\n"
+        f"📌 <b>LONG</b> = SuperTrend AL + StochRSI aşırı satım (dip)\n"
+        f"📌 <b>SHORT</b> = SuperTrend SAT + StochRSI aşırı alım (tepe)\n"
+        f"⭐ Min skor: <b>{MIN_SKOR:.0f}</b> | Hacim ≥ %{int(VOLUME_MIN_RATIO*100)}\n"
+        f"🛡 SL/TP: ST + Fib | TF 1H | {len(HEDEF_COINLER)} coin\n"
+        f"📋 Saatlik raporda kâr/zarar zorunlu"
     )
     # Sinyal beklemeden ornek grafik (Fib + Giris/SL/TP)
     try:
