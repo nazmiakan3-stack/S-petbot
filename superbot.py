@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Vadeli Sanal Bot v16.1 (OKX USDT-SWAP)
+Vadeli Sanal Bot v16.3 (OKX USDT-SWAP)
 - 50 likit vadeli coin (USDT-SWAP)
-- Cuzdan: $1000
-- Her pozisyon IZOLE marjin: $15
-- SL kaybi: $10 (risk) | TP: $30 (3R)  — RR 1:3
-- SuperTrend (10,3) + RSI giris
-  LONG : ST BUY + RSI < 70
-  SHORT: ST SELL + RSI > 30
+- Cuzdan: $1000 | Marjin $15 IZOLE | SL risk $10 | TP $30 (3R)
+- Giris: SuperTrend flip VEYA ST cizgisine pullback + RSI
+- SL/TP: SuperTrend cizgisine gore (Fib SADECE referans, islem icin kullanilmaz)
+  LONG  SL = ST_line altinda | TP = giris + 3 * risk mesafesi
+  SHORT SL = ST_line ustunde | TP = giris - 3 * risk mesafesi
+  ST yoksa ATR yedek
+- Grafik: yesil/kirmizi SuperTrend bolgeleri + AL/SAT oklar + Giris/SL/TP + Fib
 - TF: 1H
-- Grafik: Giris/SL/TP etiketli + Fibonacci seviyeleri
-- Baslangicta test grafiği (sinyal olmasa da) Telegram'a gider
-- Saatlik PnL raporu
 """
 
 import os
@@ -517,7 +515,7 @@ def grafik_ciz(df, symbol, yon, skor, info=None, giris=None, stop=None, hedef=No
             except Exception:
                 pass
 
-            # SuperTrend cizgisi + AL / SAT isaretleri (TV gibi)
+            # SuperTrend: yesil = AL bolgesi, kirmizi = SAT bolgesi + buyuk AL/SAT oklar
             try:
                 st = ta.supertrend(high, low, close, length=ST_LENGTH, multiplier=ST_MULT)
                 st_line = None
@@ -536,10 +534,21 @@ def grafik_ciz(df, symbol, yon, skor, info=None, giris=None, stop=None, hedef=No
                     st_line = st_line.reindex(df_plot.index)
                     if st_dir is not None:
                         st_dir = st_dir.reindex(df_plot.index)
-                    if st_line is not None and st_line.notna().sum() > 5:
-                        addplots.append(mpf.make_addplot(st_line, color="#26a69a", width=1.6, panel=0))
 
-                    # AL / SAT noktalari: yon degisimi
+                    if st_line is not None and st_dir is not None and st_line.notna().sum() > 5:
+                        # Iki renkli ST: bullish yesil, bearish kirmizi
+                        st_up = st_line.where(st_dir > 0)
+                        st_dn = st_line.where(st_dir < 0)
+                        if st_up.notna().sum() > 0:
+                            addplots.append(mpf.make_addplot(
+                                st_up, color="#00c853", width=2.2, panel=0))
+                        if st_dn.notna().sum() > 0:
+                            addplots.append(mpf.make_addplot(
+                                st_dn, color="#ff1744", width=2.2, panel=0))
+                    elif st_line is not None and st_line.notna().sum() > 5:
+                        addplots.append(mpf.make_addplot(
+                            st_line, color="#26a69a", width=2.0, panel=0))
+
                     if st_dir is not None and st_dir.notna().sum() > 5:
                         buy_marks = pd.Series(np.nan, index=df_plot.index)
                         sell_marks = pd.Series(np.nan, index=df_plot.index)
@@ -547,21 +556,20 @@ def grafik_ciz(df, symbol, yon, skor, info=None, giris=None, stop=None, hedef=No
                         lows = low.values
                         highs = high.values
                         for i in range(1, len(d)):
-                            prev, cur = d[i - 1], d[i]
-                            # SUPERTd: 1 = bullish (AL), -1 = bearish (SAT)
-                            if prev < 0 and cur > 0:
-                                buy_marks.iloc[i] = lows[i] * 0.997  # mum altina
-                            elif prev > 0 and cur < 0:
-                                sell_marks.iloc[i] = highs[i] * 1.003  # mum ustune
+                            prev, cur = float(d[i - 1]), float(d[i])
+                            if prev <= 0 and cur > 0:
+                                buy_marks.iloc[i] = lows[i] * 0.995
+                            elif prev >= 0 and cur < 0:
+                                sell_marks.iloc[i] = highs[i] * 1.005
                         if buy_marks.notna().sum() > 0:
                             addplots.append(mpf.make_addplot(
-                                buy_marks, type="scatter", markersize=80,
-                                marker="^", color="#00c853", panel=0,
+                                buy_marks, type="scatter", markersize=120,
+                                marker="^", color="#00e676", panel=0,
                             ))
                         if sell_marks.notna().sum() > 0:
                             addplots.append(mpf.make_addplot(
-                                sell_marks, type="scatter", markersize=80,
-                                marker="v", color="#d50000", panel=0,
+                                sell_marks, type="scatter", markersize=120,
+                                marker="v", color="#ff1744", panel=0,
                             ))
             except Exception as e:
                 print(f"ST addplot: {e}")
@@ -650,8 +658,8 @@ def grafik_ciz(df, symbol, yon, skor, info=None, giris=None, stop=None, hedef=No
             ax = axes[0] if isinstance(axes, (list, np.ndarray)) else axes
 
             ax.annotate(
-                f"{'▲ LONG' if yon == 'LONG' else '▼ SHORT'}  |  ▲ AL  ▼ SAT (SuperTrend)",
-                xy=(0.02, 0.96), xycoords="axes fraction", fontsize=10,
+                f"{'▲ LONG' if yon == 'LONG' else '▼ SHORT'} | ST: yeşil=AL kırmızı=SAT | SL=ST tabanlı | Fib=referans",
+                xy=(0.01, 0.97), xycoords="axes fraction", fontsize=8,
                 color="#26a69a" if yon == "LONG" else "#ef5350", fontweight="bold",
             )
 
@@ -712,8 +720,14 @@ def test_grafik_gonder():
         info = basit_analiz(df) or {}
         fiyat = float(info.get("fiyat") or df["close"].iloc[-1])
         atr = float(info.get("atr") or fiyat * 0.01)
-        stop = fiyat - atr * ATR_SL_MULT
-        hedef = fiyat + atr * ATR_TP_MULT
+        st_line = info.get("st_line")
+        buf = atr * 0.15
+        if st_line is not None and st_line < fiyat:
+            stop = float(st_line) - buf
+        else:
+            stop = fiyat - atr * ATR_SL_MULT
+        risk_px = max(fiyat - stop, atr * 0.3)
+        hedef = fiyat + risk_px * ATR_TP_MULT
         foto = grafik_ciz(df, symbol, "LONG", 0.0, info, giris=fiyat, stop=stop, hedef=hedef)
         if foto and os.path.exists(foto):
             telegram_foto(
@@ -722,9 +736,10 @@ def test_grafik_gonder():
                 f"📂 <code>{DOSYA_ADI}</code>\n"
                 f"🪙 {symbol} | 1H\n"
                 f"💰 GİRİŞ: {fiyat:.4f}\n"
-                f"🛡 SL: {stop:.4f}\n"
-                f"🎯 TP: {hedef:.4f}\n"
-                f"📐 Fib + ST + RSI\n"
+                f"🛡 SL (SuperTrend): {stop:.4f}\n"
+                f"🎯 TP (3R): {hedef:.4f}\n"
+                f"🟢 ST yeşil=AL · 🔴 kırmızı=SAT · ▲▼ flip okları\n"
+                f"ℹ️ Fib sadece referans (SL/TP Fib değil)\n"
                 f"📎 <code>{os.path.basename(foto)}</code>",
             )
             print(f"Test grafik gonderildi: {foto}")
@@ -762,13 +777,25 @@ def telegram_gonder(symbol, skor, fiyat, df, yon, info):
     atr = info.get("atr") or fiyat * 0.02
     if atr <= 0:
         atr = fiyat * 0.02
+    st_line = info.get("st_line")
 
+    # SL/TP = SuperTrend tabanli (Fib degil)
+    # LONG: SL ST cizgisinin biraz alti; SHORT: ST biraz ustu; TP = 3R
+    buf = atr * 0.15
     if yon == "LONG":
-        stop = fiyat - atr * ATR_SL_MULT
-        hedef = fiyat + atr * ATR_TP_MULT
+        if st_line is not None and st_line < fiyat:
+            stop = float(st_line) - buf
+        else:
+            stop = fiyat - atr * ATR_SL_MULT
+        risk_px = max(fiyat - stop, atr * 0.3)
+        hedef = fiyat + risk_px * ATR_TP_MULT
     else:
-        stop = fiyat + atr * ATR_SL_MULT
-        hedef = fiyat - atr * ATR_TP_MULT
+        if st_line is not None and st_line > fiyat:
+            stop = float(st_line) + buf
+        else:
+            stop = fiyat + atr * ATR_SL_MULT
+        risk_px = max(stop - fiyat, atr * 0.3)
+        hedef = fiyat - risk_px * ATR_TP_MULT
 
     dosya_adi = f"{symbol.replace('-', '_')}_chart.png"
     foto = grafik_ciz(df, symbol, yon, skor, info, giris=fiyat, stop=stop, hedef=hedef)
@@ -780,19 +807,20 @@ def telegram_gonder(symbol, skor, fiyat, df, yon, info):
     last_signal_time[symbol] = now
 
     tip = info.get("sinyal_tipi") or ("FLIP" if (info.get("st_buy_flip") or info.get("st_sell_flip")) else "PULLBACK")
+    st_txt = f"{st_line:.6f}" if st_line else "yok"
     mesaj = (
         f"⚡ <b>{symbol}</b> — <b>{yon}</b> (VADELİ İZOLE)\n"
         f"📂 <code>{DOSYA_ADI}</code>\n"
-        f"📌 Sinyal: <b>{tip}</b> (ST flip veya çizgiye dönüş)\n"
+        f"📌 Sinyal: <b>{tip}</b>\n"
         f"⭐ Skor: {skor:.1f} | RSI: {info.get('rsi', 0):.1f}\n"
-        f"🔒 Marjin: <b>${MARJIN_USD:.0f}</b> | Risk SL: <b>${RISK_USD:.0f}</b> | TP: <b>${TP_USD:.0f}</b>\n"
-        f"📊 {KALDIRAC}x | Notional ~${POZISYON_USD:.0f}\n"
+        f"📐 SuperTrend çizgi: {st_txt}\n"
+        f"🔒 Marjin ${MARJIN_USD:.0f} | Risk ${RISK_USD:.0f} | TP ${TP_USD:.0f}\n"
         f"📈 Hacim: %{(son_hacim / ort_hacim * 100) if ort_hacim else 0:.0f}\n\n"
         f"💰 <b>GİRİŞ:</b> {fiyat:.6f}\n"
-        f"🛡 <b>SL (1×ATR):</b> {stop:.6f}\n"
-        f"🎯 <b>TP (3×ATR):</b> {hedef:.6f}\n"
-        f"📎 Grafik: <code>{dosya_adi}</code>\n"
-        f"⚠️ Sanal vadeli | RR 1:3"
+        f"🛡 <b>SL (SuperTrend):</b> {stop:.6f}\n"
+        f"🎯 <b>TP (3R):</b> {hedef:.6f}\n"
+        f"ℹ️ Fib sadece grafikte referans — SL/TP Fib değil\n"
+        f"📎 <code>{dosya_adi}</code>"
     )
     if foto:
         telegram_foto(foto, mesaj)
@@ -894,16 +922,15 @@ def tam_tarama():
 if __name__ == "__main__":
     acilis_mesaji_goster()
     telegram_mesaj(
-        f"🚀 <b>Vadeli Sanal Bot v16.2</b>\n\n"
+        f"🚀 <b>Vadeli Sanal Bot v16.3</b>\n\n"
         f"📂 <code>{DOSYA_ADI}</code>\n"
         f"💰 Cüzdan: <b>${ILK_BAKIYE:.0f}</b>\n"
         f"🔒 Marjin: <b>${MARJIN_USD:.0f} İZOLE</b>\n"
-        f"🛡 SL risk: <b>${RISK_USD:.0f}</b> | 🎯 TP: <b>${TP_USD:.0f}</b> (1:3)\n"
-        f"⚡ {KALDIRAC}x | TF: 1H | SuperTrend+RSI\n"
-        f"📌 Giriş: <b>ST flip VEYA çizgiye dönüş (pullback)</b>\n"
-        f"⏱ Cooldown: {SIGNAL_COOLDOWN_MINUTES} dk | Hacim ≥ %{int(VOLUME_MIN_RATIO*100)}\n"
-        f"📋 {len(HEDEF_COINLER)} USDT-SWAP coin\n"
-        f"📊 Grafik: Giriş/SL/TP + Fib + AL/SAT okları"
+        f"🛡 SL/TP: <b>SuperTrend çizgisine göre</b> (Fib değil)\n"
+        f"📌 Giriş: ST flip veya pullback + RSI\n"
+        f"🟢 ST yeşil=AL bölgesi · 🔴 kırmızı=SAT · ▲▼ oklar\n"
+        f"⏱ Cooldown {SIGNAL_COOLDOWN_MINUTES} dk | Hacim ≥ %{int(VOLUME_MIN_RATIO*100)}\n"
+        f"📋 {len(HEDEF_COINLER)} SWAP | TF 1H"
     )
     # Sinyal beklemeden ornek grafik (Fib + Giris/SL/TP)
     try:
