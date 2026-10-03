@@ -166,7 +166,9 @@ def hacim_yeterli_mi(df: pd.DataFrame):
 
 
 def supertrend_hesapla(df: pd.DataFrame):
-    """Donus: st_line, d_now, st_buy_flip, st_sell_flip"""
+    """Donus: st_line, d_now, st_buy_flip, st_sell_flip
+    Flip son 3 mumda aranir; tepe/dip + ST kirilimina duyarli.
+    """
     st = ta.supertrend(df["high"], df["low"], df["close"], length=ST_LENGTH, multiplier=ST_MULT)
     if st is None or st.empty:
         return None, 0.0, False, False
@@ -186,12 +188,21 @@ def supertrend_hesapla(df: pd.DataFrame):
     st_line = st[line_col]
     st_dir = st[dir_col]
     d_now = float(st_dir.iloc[-1]) if pd.notna(st_dir.iloc[-1]) else 0.0
-    d_prev = float(st_dir.iloc[-2]) if len(st_dir) > 1 and pd.notna(st_dir.iloc[-2]) else d_now
 
-    st_buy = (d_prev < 0 and d_now > 0)
-    st_sell = (d_prev > 0 and d_now < 0)
+    # Son 3 mumda yon degisimi (tepe/dip kacmasin)
+    st_buy = False
+    st_sell = False
+    n = len(st_dir)
+    for i in range(max(1, n - 3), n):
+        d0 = float(st_dir.iloc[i - 1]) if pd.notna(st_dir.iloc[i - 1]) else 0.0
+        d1 = float(st_dir.iloc[i]) if pd.notna(st_dir.iloc[i]) else 0.0
+        if d0 <= 0 and d1 > 0:
+            st_buy = True
+        if d0 >= 0 and d1 < 0:
+            st_sell = True
 
-    if not st_buy and not st_sell and len(df) >= 2:
+    # Fiyat ST cizgisini kirdi (close cross) — son 2 mum
+    if len(df) >= 2 and st_line is not None:
         line_now = float(st_line.iloc[-1]) if pd.notna(st_line.iloc[-1]) else None
         line_prev = float(st_line.iloc[-2]) if pd.notna(st_line.iloc[-2]) else line_now
         if line_now is not None and line_prev is not None:
@@ -201,7 +212,104 @@ def supertrend_hesapla(df: pd.DataFrame):
             if c0 > line_prev and c1 <= line_now:
                 st_sell = True
 
+    # Yerel dip/tepe + ST hizasi (son 5 mum)
+    if len(df) >= 6 and st_line is not None and pd.notna(st_line.iloc[-1]):
+        lv = float(st_line.iloc[-1])
+        lows = df["low"].iloc[-5:]
+        highs = df["high"].iloc[-5:]
+        c1 = float(df["close"].iloc[-1])
+        # Dip: son low, 5 mumun minimumu ve close ST ustunde
+        if float(df["low"].iloc[-1]) <= float(lows.min()) * 1.001 and c1 >= lv:
+            if d_now > 0 or c1 > lv:
+                st_buy = True
+        # Tepe: son high, 5 mumun maksimumu ve close ST altinda
+        if float(df["high"].iloc[-1]) >= float(highs.max()) * 0.999 and c1 <= lv:
+            if d_now < 0 or c1 < lv:
+                st_sell = True
+
     return st_line, d_now, st_buy, st_sell
+
+
+def fib_sl_tp(yon, fiyat, atr, st_line, fib_levels, swing_hi, swing_lo):
+    """SL/TP: SuperTrend ana + Fibonacci destek/direnc ile hizala. RR hedef ~1:3."""
+    buf = atr * 0.12
+    min_risk = atr * 0.35
+
+    if yon == "LONG":
+        st_sl = (float(st_line) - buf) if (st_line is not None and st_line < fiyat) else (fiyat - atr)
+        # Fib destekleri (fiyat altinda) — en yakin destek
+        fib_below = sorted([v for v in (fib_levels or {}).values() if v is not None and v < fiyat], reverse=True)
+        fib_sl = fib_below[0] if fib_below else None
+        # Swing low
+        sw_sl = (swing_lo - buf) if (swing_lo is not None and swing_lo < fiyat) else None
+
+        # Adaylar: ST, Fib, swing — fiyata en yakin ama min_risk altinda olmayan
+        cands = [st_sl]
+        if fib_sl is not None:
+            cands.append(fib_sl - buf * 0.3)
+        if sw_sl is not None:
+            cands.append(sw_sl)
+        # Gecerli: entry - stop >= min_risk
+        valid = [s for s in cands if fiyat - s >= min_risk]
+        stop = max(valid) if valid else st_sl  # daha siki (yuksek) SL
+        if fiyat - stop < min_risk:
+            stop = fiyat - min_risk
+        risk = max(fiyat - stop, min_risk)
+
+        # TP: Fib direnc ustunde veya 3R; swing high
+        fib_above = sorted([v for v in (fib_levels or {}).values() if v is not None and v > fiyat])
+        tp_3r = fiyat + risk * ATR_TP_MULT
+        hedef = tp_3r
+        if fib_above:
+            # En az 1.5R olan ilk Fib hedef
+            for fv in fib_above:
+                if fv - fiyat >= risk * 1.5:
+                    hedef = fv
+                    break
+        if swing_hi is not None and swing_hi > fiyat and (swing_hi - fiyat) >= risk * 1.5:
+            # Swing high 1.5R-3R araligindaysa onu kullan; daha uzaktaysa 3R
+            if swing_hi <= tp_3r:
+                hedef = max(hedef if hedef != tp_3r else swing_hi, swing_hi)
+            else:
+                hedef = max(hedef, min(swing_hi, tp_3r * 1.05))
+        # Garantili min 2R
+        if hedef - fiyat < risk * 2.0:
+            hedef = fiyat + risk * ATR_TP_MULT
+        return stop, hedef, "ST+Fib"
+
+    else:  # SHORT
+        st_sl = (float(st_line) + buf) if (st_line is not None and st_line > fiyat) else (fiyat + atr)
+        fib_above = sorted([v for v in (fib_levels or {}).values() if v is not None and v > fiyat])
+        fib_sl = fib_above[0] if fib_above else None
+        sw_sl = (swing_hi + buf) if (swing_hi is not None and swing_hi > fiyat) else None
+
+        cands = [st_sl]
+        if fib_sl is not None:
+            cands.append(fib_sl + buf * 0.3)
+        if sw_sl is not None:
+            cands.append(sw_sl)
+        valid = [s for s in cands if s - fiyat >= min_risk]
+        stop = min(valid) if valid else st_sl
+        if stop - fiyat < min_risk:
+            stop = fiyat + min_risk
+        risk = max(stop - fiyat, min_risk)
+
+        fib_below = sorted([v for v in (fib_levels or {}).values() if v is not None and v < fiyat], reverse=True)
+        tp_3r = fiyat - risk * ATR_TP_MULT
+        hedef = tp_3r
+        if fib_below:
+            for fv in fib_below:
+                if fiyat - fv >= risk * 1.5:
+                    hedef = fv
+                    break
+        if swing_lo is not None and swing_lo < fiyat and (fiyat - swing_lo) >= risk * 1.5:
+            if swing_lo >= tp_3r:
+                hedef = min(hedef if hedef != tp_3r else swing_lo, swing_lo)
+            else:
+                hedef = min(hedef, max(swing_lo, tp_3r * 0.95))
+        if fiyat - hedef < risk * 2.0:
+            hedef = fiyat - risk * ATR_TP_MULT
+        return stop, hedef, "ST+Fib"
 
 
 def basit_analiz(df: pd.DataFrame) -> dict:
@@ -221,22 +329,17 @@ def basit_analiz(df: pd.DataFrame) -> dict:
 
     st_line_val = float(st_line.iloc[-1]) if st_line is not None and pd.notna(st_line.iloc[-1]) else None
 
-    # Trend devam + ST cizgisine dokunus / yakin pullback
-    # LONG: ST bullish (d>0) ve low ST'ye ATR*frac kadar yaklasti veya kesti, close hala ustunde
-    # SHORT: ST bearish ve high ST'ye yaklasti, close hala altinda
     st_pullback_long = False
     st_pullback_short = False
     if st_line_val is not None and atr_val > 0:
         tol = atr_val * ST_TOUCH_ATR_FRAC
         if st_dir > 0 and fiyat >= st_line_val:
-            # mum ST'ye degdi veya cok yaklasti
             if low_son <= st_line_val + tol:
                 st_pullback_long = True
         if st_dir < 0 and fiyat <= st_line_val:
             if high_son >= st_line_val - tol:
                 st_pullback_short = True
 
-    # Nihai sinyal: flip VEYA pullback
     st_buy = bool(st_buy_flip or st_pullback_long)
     st_sell = bool(st_sell_flip or st_pullback_short)
     sinyal_tipi = ""
@@ -274,6 +377,8 @@ def basit_analiz(df: pd.DataFrame) -> dict:
         "rsi_ok_long": rsi_val < RSI_LONG_MAX,
         "rsi_ok_short": rsi_val > RSI_SHORT_MIN,
         "fib_levels": fib_levels,
+        "swing_hi": hi,
+        "swing_lo": lo,
         "above_ma50": fiyat > (float(df["MA50"].iloc[-1]) if pd.notna(df["MA50"].iloc[-1]) else 0),
     }
 
@@ -555,20 +660,29 @@ def grafik_ciz(df, symbol, yon, skor, info=None, giris=None, stop=None, hedef=No
                         d = st_dir.fillna(0).values
                         lows = low.values
                         highs = high.values
+                        closes = close.values
+                        st_vals = st_line.fillna(method="ffill").values if st_line is not None else None
                         for i in range(1, len(d)):
                             prev, cur = float(d[i - 1]), float(d[i])
+                            # Klasik flip
                             if prev <= 0 and cur > 0:
-                                buy_marks.iloc[i] = lows[i] * 0.995
+                                buy_marks.iloc[i] = lows[i] * 0.994
                             elif prev >= 0 and cur < 0:
-                                sell_marks.iloc[i] = highs[i] * 1.005
+                                sell_marks.iloc[i] = highs[i] * 1.006
+                            # Close ile ST kirilimi (tepe/dip kacmasin)
+                            if st_vals is not None and i >= 1:
+                                if closes[i - 1] < st_vals[i - 1] and closes[i] >= st_vals[i]:
+                                    buy_marks.iloc[i] = lows[i] * 0.994
+                                if closes[i - 1] > st_vals[i - 1] and closes[i] <= st_vals[i]:
+                                    sell_marks.iloc[i] = highs[i] * 1.006
                         if buy_marks.notna().sum() > 0:
                             addplots.append(mpf.make_addplot(
-                                buy_marks, type="scatter", markersize=120,
+                                buy_marks, type="scatter", markersize=130,
                                 marker="^", color="#00e676", panel=0,
                             ))
                         if sell_marks.notna().sum() > 0:
                             addplots.append(mpf.make_addplot(
-                                sell_marks, type="scatter", markersize=120,
+                                sell_marks, type="scatter", markersize=130,
                                 marker="v", color="#ff1744", panel=0,
                             ))
             except Exception as e:
@@ -778,24 +892,13 @@ def telegram_gonder(symbol, skor, fiyat, df, yon, info):
     if atr <= 0:
         atr = fiyat * 0.02
     st_line = info.get("st_line")
+    fib_levels = info.get("fib_levels") or {}
+    swing_hi = info.get("swing_hi")
+    swing_lo = info.get("swing_lo")
 
-    # SL/TP = SuperTrend tabanli (Fib degil)
-    # LONG: SL ST cizgisinin biraz alti; SHORT: ST biraz ustu; TP = 3R
-    buf = atr * 0.15
-    if yon == "LONG":
-        if st_line is not None and st_line < fiyat:
-            stop = float(st_line) - buf
-        else:
-            stop = fiyat - atr * ATR_SL_MULT
-        risk_px = max(fiyat - stop, atr * 0.3)
-        hedef = fiyat + risk_px * ATR_TP_MULT
-    else:
-        if st_line is not None and st_line > fiyat:
-            stop = float(st_line) + buf
-        else:
-            stop = fiyat + atr * ATR_SL_MULT
-        risk_px = max(stop - fiyat, atr * 0.3)
-        hedef = fiyat - risk_px * ATR_TP_MULT
+    stop, hedef, sltp_mod = fib_sl_tp(
+        yon, fiyat, atr, st_line, fib_levels, swing_hi, swing_lo
+    )
 
     dosya_adi = f"{symbol.replace('-', '_')}_chart.png"
     foto = grafik_ciz(df, symbol, yon, skor, info, giris=fiyat, stop=stop, hedef=hedef)
@@ -813,13 +916,13 @@ def telegram_gonder(symbol, skor, fiyat, df, yon, info):
         f"📂 <code>{DOSYA_ADI}</code>\n"
         f"📌 Sinyal: <b>{tip}</b>\n"
         f"⭐ Skor: {skor:.1f} | RSI: {info.get('rsi', 0):.1f}\n"
-        f"📐 SuperTrend çizgi: {st_txt}\n"
+        f"📐 SuperTrend: {st_txt}\n"
         f"🔒 Marjin ${MARJIN_USD:.0f} | Risk ${RISK_USD:.0f} | TP ${TP_USD:.0f}\n"
         f"📈 Hacim: %{(son_hacim / ort_hacim * 100) if ort_hacim else 0:.0f}\n\n"
         f"💰 <b>GİRİŞ:</b> {fiyat:.6f}\n"
-        f"🛡 <b>SL (SuperTrend):</b> {stop:.6f}\n"
-        f"🎯 <b>TP (3R):</b> {hedef:.6f}\n"
-        f"ℹ️ Fib sadece grafikte referans — SL/TP Fib değil\n"
+        f"🛡 <b>SL (ST+Fib):</b> {stop:.6f}\n"
+        f"🎯 <b>TP (ST+Fib / 3R):</b> {hedef:.6f}\n"
+        f"ℹ️ SL/TP: SuperTrend + Fibonacci destek/direnç\n"
         f"📎 <code>{dosya_adi}</code>"
     )
     if foto:
@@ -922,13 +1025,13 @@ def tam_tarama():
 if __name__ == "__main__":
     acilis_mesaji_goster()
     telegram_mesaj(
-        f"🚀 <b>Vadeli Sanal Bot v16.3</b>\n\n"
+        f"🚀 <b>Vadeli Sanal Bot v16.4</b>\n\n"
         f"📂 <code>{DOSYA_ADI}</code>\n"
         f"💰 Cüzdan: <b>${ILK_BAKIYE:.0f}</b>\n"
         f"🔒 Marjin: <b>${MARJIN_USD:.0f} İZOLE</b>\n"
-        f"🛡 SL/TP: <b>SuperTrend çizgisine göre</b> (Fib değil)\n"
-        f"📌 Giriş: ST flip veya pullback + RSI\n"
-        f"🟢 ST yeşil=AL bölgesi · 🔴 kırmızı=SAT · ▲▼ oklar\n"
+        f"🛡 SL/TP: <b>SuperTrend + Fibonacci</b>\n"
+        f"📌 Giriş: ST flip (3 mum) / kirilim / tepe-dip + pullback\n"
+        f"🟢 ST AL · 🔴 ST SAT · ▲▼ oklar güçlendirildi\n"
         f"⏱ Cooldown {SIGNAL_COOLDOWN_MINUTES} dk | Hacim ≥ %{int(VOLUME_MIN_RATIO*100)}\n"
         f"📋 {len(HEDEF_COINLER)} SWAP | TF 1H"
     )
