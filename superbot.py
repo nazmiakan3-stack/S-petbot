@@ -244,85 +244,50 @@ def supertrend_hesapla(df: pd.DataFrame):
 
 
 def fib_sl_tp(yon, fiyat, atr, st_line, fib_levels, swing_hi, swing_lo):
-    """SL/TP: SuperTrend ana + Fibonacci destek/direnc ile hizala. RR hedef ~1:3."""
-    buf = atr * 0.12
-    min_risk = atr * 0.35
+    """SL = SuperTrend (ana). TP = 3R.
+    Fib sadece ST/3R'ye cok yakinsa (0.25 ATR) hizalanir — grafik ile uyumlu.
+    """
+    buf = atr * 0.15
+    min_risk = atr * 0.4
+    snap = atr * 0.25
 
     if yon == "LONG":
-        st_sl = (float(st_line) - buf) if (st_line is not None and st_line < fiyat) else (fiyat - atr)
-        # Fib destekleri (fiyat altinda) — en yakin destek
-        fib_below = sorted([v for v in (fib_levels or {}).values() if v is not None and v < fiyat], reverse=True)
-        fib_sl = fib_below[0] if fib_below else None
-        # Swing low
-        sw_sl = (swing_lo - buf) if (swing_lo is not None and swing_lo < fiyat) else None
-
-        # Adaylar: ST, Fib, swing — fiyata en yakin ama min_risk altinda olmayan
-        cands = [st_sl]
-        if fib_sl is not None:
-            cands.append(fib_sl - buf * 0.3)
-        if sw_sl is not None:
-            cands.append(sw_sl)
-        # Gecerli: entry - stop >= min_risk
-        valid = [s for s in cands if fiyat - s >= min_risk]
-        stop = max(valid) if valid else st_sl  # daha siki (yuksek) SL
+        stop = (float(st_line) - buf) if (st_line is not None and st_line < fiyat) else (fiyat - atr * ATR_SL_MULT)
         if fiyat - stop < min_risk:
             stop = fiyat - min_risk
-        risk = max(fiyat - stop, min_risk)
-
-        # TP: Fib direnc ustunde veya 3R; swing high
-        fib_above = sorted([v for v in (fib_levels or {}).values() if v is not None and v > fiyat])
-        tp_3r = fiyat + risk * ATR_TP_MULT
-        hedef = tp_3r
-        if fib_above:
-            # En az 1.5R olan ilk Fib hedef
-            for fv in fib_above:
-                if fv - fiyat >= risk * 1.5:
-                    hedef = fv
+        # Fib destegi ST'ye cok yakinsa SL'yi Fib'e cek
+        for v in (fib_levels or {}).values():
+            if v is not None and v < fiyat and abs(v - stop) <= snap:
+                if fiyat - v >= min_risk:
+                    stop = float(v)
                     break
-        if swing_hi is not None and swing_hi > fiyat and (swing_hi - fiyat) >= risk * 1.5:
-            # Swing high 1.5R-3R araligindaysa onu kullan; daha uzaktaysa 3R
-            if swing_hi <= tp_3r:
-                hedef = max(hedef if hedef != tp_3r else swing_hi, swing_hi)
-            else:
-                hedef = max(hedef, min(swing_hi, tp_3r * 1.05))
-        # Garantili min 2R
-        if hedef - fiyat < risk * 2.0:
-            hedef = fiyat + risk * ATR_TP_MULT
-        return stop, hedef, "ST+Fib"
+        risk = max(fiyat - stop, min_risk)
+        hedef = fiyat + risk * ATR_TP_MULT
+        # Fib direnci 3R'ye yakinsa TP'yi Fib'e cek (min 2R)
+        for v in sorted((fib_levels or {}).values()):
+            if v is not None and v > fiyat and abs(v - hedef) <= snap * 1.5:
+                if v - fiyat >= risk * 2.0:
+                    hedef = float(v)
+                    break
+        return stop, hedef, "ST+3R"
 
-    else:  # SHORT
-        st_sl = (float(st_line) + buf) if (st_line is not None and st_line > fiyat) else (fiyat + atr)
-        fib_above = sorted([v for v in (fib_levels or {}).values() if v is not None and v > fiyat])
-        fib_sl = fib_above[0] if fib_above else None
-        sw_sl = (swing_hi + buf) if (swing_hi is not None and swing_hi > fiyat) else None
-
-        cands = [st_sl]
-        if fib_sl is not None:
-            cands.append(fib_sl + buf * 0.3)
-        if sw_sl is not None:
-            cands.append(sw_sl)
-        valid = [s for s in cands if s - fiyat >= min_risk]
-        stop = min(valid) if valid else st_sl
+    else:
+        stop = (float(st_line) + buf) if (st_line is not None and st_line > fiyat) else (fiyat + atr * ATR_SL_MULT)
         if stop - fiyat < min_risk:
             stop = fiyat + min_risk
-        risk = max(stop - fiyat, min_risk)
-
-        fib_below = sorted([v for v in (fib_levels or {}).values() if v is not None and v < fiyat], reverse=True)
-        tp_3r = fiyat - risk * ATR_TP_MULT
-        hedef = tp_3r
-        if fib_below:
-            for fv in fib_below:
-                if fiyat - fv >= risk * 1.5:
-                    hedef = fv
+        for v in sorted((fib_levels or {}).values()):
+            if v is not None and v > fiyat and abs(v - stop) <= snap:
+                if v - fiyat >= min_risk:
+                    stop = float(v)
                     break
-        if swing_lo is not None and swing_lo < fiyat and (fiyat - swing_lo) >= risk * 1.5:
-            if swing_lo >= tp_3r:
-                hedef = min(hedef if hedef != tp_3r else swing_lo, swing_lo)
-            else:
-                hedef = min(hedef, max(swing_lo, tp_3r * 0.95))
-        if fiyat - hedef < risk * 2.0:
-            hedef = fiyat - risk * ATR_TP_MULT
-        return stop, hedef, "ST+Fib"
+        risk = max(stop - fiyat, min_risk)
+        hedef = fiyat - risk * ATR_TP_MULT
+        for v in sorted((fib_levels or {}).values(), reverse=True):
+            if v is not None and v < fiyat and abs(v - hedef) <= snap * 1.5:
+                if fiyat - v >= risk * 2.0:
+                    hedef = float(v)
+                    break
+        return stop, hedef, "ST+3R"
 
 
 def basit_analiz(df: pd.DataFrame) -> dict:
@@ -782,77 +747,29 @@ def grafik_ciz(df, symbol, yon, skor, info=None, giris=None, stop=None, hedef=No
                         addplots.append(mpf.make_addplot(
                             st_line, color="#26a69a", width=2.0, panel=0))
 
-                    # --- AL / SAT: flip + kirilim + yerel dip/tepe (genis, isaretlerine yakin) ---
+                    # --- AL / SAT: SADECE gercek SuperTrend yon flip (profesyonel, az ok) ---
                     buy_marks = pd.Series(np.nan, index=df_plot.index)
                     sell_marks = pd.Series(np.nan, index=df_plot.index)
-                    if st_line is not None:
-                        st_vals = st_line.ffill().values
-                        d_vals = (st_dir.ffill().fillna(0).values if st_dir is not None
-                                  else np.zeros(len(df_plot)))
+                    if st_dir is not None:
+                        d_vals = st_dir.ffill().fillna(0).values
                         lows = low.values.astype(float)
                         highs = high.values.astype(float)
-                        closes = close.values.astype(float)
-                        opens = df_plot["Open"].values.astype(float)
-                        n = len(closes)
-                        pivot = 2
-
-                        for i in range(1, n):
+                        for i in range(1, len(d_vals)):
                             prev_d, cur_d = float(d_vals[i - 1]), float(d_vals[i])
-                            st_i = float(st_vals[i]) if np.isfinite(st_vals[i]) else None
-                            st_p = float(st_vals[i - 1]) if np.isfinite(st_vals[i - 1]) else st_i
-
-                            if prev_d <= 0 and cur_d > 0:
-                                buy_marks.iloc[i] = lows[i] * 0.991
-                            if prev_d >= 0 and cur_d < 0:
-                                sell_marks.iloc[i] = highs[i] * 1.009
-
-                            if st_i is not None and st_p is not None:
-                                if closes[i - 1] < st_p and closes[i] >= st_i:
-                                    buy_marks.iloc[i] = lows[i] * 0.991
-                                if closes[i - 1] > st_p and closes[i] <= st_i:
-                                    sell_marks.iloc[i] = highs[i] * 1.009
-
-                        # Yerel dip = AL, yerel tepe = SAT (ST mesafesi genis)
-                        for i in range(pivot, n - pivot):
-                            st_i = float(st_vals[i]) if np.isfinite(st_vals[i]) else None
-                            if st_i is None:
-                                continue
-                            cur_d = float(d_vals[i])
-                            w0, w1 = i - pivot, i + pivot + 1
-                            is_swing_low = lows[i] <= np.min(lows[w0:w1]) * 1.0003
-                            is_swing_high = highs[i] >= np.max(highs[w0:w1]) * 0.9997
-                            atr_est = float(np.mean(highs[max(0, i - 14):i + 1] - lows[max(0, i - 14):i + 1]))
-                            if not np.isfinite(atr_est) or atr_est <= 0:
-                                atr_est = closes[i] * 0.01
-
-                            # AL: swing low, close ST ustunde veya yesil bolge, ST yakin (2.5 ATR)
-                            if is_swing_low and closes[i] >= st_i * 0.997:
-                                if cur_d > 0 or closes[i] >= st_i:
-                                    if abs(lows[i] - st_i) <= atr_est * 2.8 or lows[i] <= st_i * 1.015:
-                                        buy_marks.iloc[i] = lows[i] * 0.990
-
-                            # AL: yesil ST + low ST'ye degiyor
-                            if cur_d > 0 and lows[i] <= st_i * 1.012 and closes[i] >= st_i * 0.998:
-                                buy_marks.iloc[i] = lows[i] * 0.990
-
-                            # SAT: swing high
-                            if is_swing_high and closes[i] <= st_i * 1.003:
-                                if cur_d < 0 or closes[i] <= st_i:
-                                    if abs(highs[i] - st_i) <= atr_est * 2.8 or highs[i] >= st_i * 0.985:
-                                        sell_marks.iloc[i] = highs[i] * 1.010
-
-                            # SAT: kirmizi ST + high ST'ye degiyor
-                            if cur_d < 0 and highs[i] >= st_i * 0.988 and closes[i] <= st_i * 1.002:
-                                sell_marks.iloc[i] = highs[i] * 1.010
+                            # 1 = bullish, -1 = bearish — sadece renk degisimi
+                            if prev_d < 0 and cur_d > 0:
+                                buy_marks.iloc[i] = lows[i] * 0.992
+                            elif prev_d > 0 and cur_d < 0:
+                                sell_marks.iloc[i] = highs[i] * 1.008
 
                         if buy_marks.notna().sum() > 0:
                             addplots.append(mpf.make_addplot(
-                                buy_marks, type="scatter", markersize=160,
-                                marker="^", color="#00e676", panel=0,
+                                buy_marks, type="scatter", markersize=110,
+                                marker="^", color="#00c853", panel=0,
                             ))
                         if sell_marks.notna().sum() > 0:
                             addplots.append(mpf.make_addplot(
-                                sell_marks, type="scatter", markersize=160,
+                                sell_marks, type="scatter", markersize=110,
                                 marker="v", color="#ff1744", panel=0,
                             ))
             except Exception as e:
@@ -887,17 +804,17 @@ def grafik_ciz(df, symbol, yon, skor, info=None, giris=None, stop=None, hedef=No
                 h_styles.append(style)
                 h_widths.append(width)
 
-            _hl(giris, "#2196f3", "-", 2.0)
-            _hl(stop, "#f44336", "-", 2.0)
-            _hl(hedef, "#4caf50", "-", 2.0)
+            # Giris / SL / TP kalin (asıl seviyeler)
+            _hl(giris, "#1e88e5", "-", 2.4)
+            _hl(stop, "#e53935", "-", 2.4)
+            _hl(hedef, "#43a047", "-", 2.4)
 
+            # Fib sadece ana seviyeler (0.382 / 0.5 / 0.618) — kalabalik yok
             fib_levels = (info or {}).get("fib_levels") or {}
-            fib_colors = {
-                0.236: "#9e9e9e", 0.382: "#ff9800", 0.5: "#42a5f5",
-                0.618: "#66bb6a", 0.786: "#e91e63", 0.886: "#9c27b0",
-            }
-            for ratio, level in fib_levels.items():
-                _hl(level, fib_colors.get(ratio, "#757575"), "--", 0.9)
+            fib_colors = {0.382: "#ffb74d", 0.5: "#90caf9", 0.618: "#a5d6a7"}
+            for ratio in (0.382, 0.5, 0.618):
+                if ratio in fib_levels:
+                    _hl(fib_levels[ratio], fib_colors[ratio], "--", 0.8)
 
             hlines = None
             if h_vals:
@@ -926,7 +843,7 @@ def grafik_ciz(df, symbol, yon, skor, info=None, giris=None, stop=None, hedef=No
             kwargs = dict(
                 type="candle",
                 style=style,
-                title=f"{symbol} | {yon} | ST+RSI | Giriş/SL/TP/Fib",
+                title=f"{symbol} | {yon} | SuperTrend flip | Giriş/SL/TP",
                 returnfig=True,
                 volume=False,
                 figsize=(12, 8),
@@ -942,7 +859,7 @@ def grafik_ciz(df, symbol, yon, skor, info=None, giris=None, stop=None, hedef=No
             ax = axes[0] if isinstance(axes, (list, np.ndarray)) else axes
 
             ax.annotate(
-                f"{'▲ LONG' if yon == 'LONG' else '▼ SHORT'} | ST: yeşil=AL kırmızı=SAT | SL=ST tabanlı | Fib=referans",
+                f"{'▲ LONG' if yon == 'LONG' else '▼ SHORT'} | ST flip okları | SL=ST · TP=3R · Fib 38/50/62",
                 xy=(0.01, 0.97), xycoords="axes fraction", fontsize=8,
                 color="#26a69a" if yon == "LONG" else "#ef5350", fontweight="bold",
             )
@@ -1098,8 +1015,8 @@ def telegram_gonder(symbol, skor, fiyat, df, yon, info):
         f"🔒 Marjin ${MARJIN_USD:.0f} | Risk ${RISK_USD:.0f} | TP ${TP_USD:.0f}\n"
         f"📈 Hacim: %{(son_hacim / ort_hacim * 100) if ort_hacim else 0:.0f}\n\n"
         f"💰 <b>GİRİŞ:</b> {fiyat:.6f}\n"
-        f"🛡 <b>SL (ST+Fib):</b> {stop:.6f}\n"
-        f"🎯 <b>TP (ST+Fib):</b> {hedef:.6f}\n"
+        f"🛡 <b>SL (SuperTrend):</b> {stop:.6f}\n"
+        f"🎯 <b>TP (3R):</b> {hedef:.6f}\n"
         f"📎 Grafik: <code>{dosya_adi}</code>"
     )
     if foto:
@@ -1235,7 +1152,7 @@ if __name__ == "__main__":
     acilis_mesaji_goster()
     db_kurulum()
     telegram_mesaj(
-        f"🚀 <b>Vadeli Sanal Bot v16.6</b>\n\n"
+        f"🚀 <b>Vadeli Sanal Bot v16.7</b>\n\n"
         f"📂 Dosya: <code>{DOSYA_ADI}</code>\n"
         f"💰 Cüzdan: <b>${bakiye_oku():.2f}</b> (başlangıç ${ILK_BAKIYE:.0f})\n"
         f"🔒 Marjin ${MARJIN_USD:.0f} İZOLE | Risk ${RISK_USD:.0f}\n"
