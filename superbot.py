@@ -478,98 +478,146 @@ def analiz_yap(symbol: str):
     return skor, info["fiyat"], yon, info, df
 
 
+_db_lock = threading.Lock()
+
+
 def db_baglanti():
-    conn = sqlite3.connect(os.path.join(ARTIFACT_DIR, "islemler.db"), check_same_thread=False)
+    path = os.path.join(ARTIFACT_DIR, "islemler.db")
+    conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
     return conn, conn.cursor()
 
 
-def db_kurulum():
-    conn, c = db_baglanti()
-    c.execute("""CREATE TABLE IF NOT EXISTS cuzdan (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, bakiye REAL DEFAULT 1000.0, guncelleme TEXT)""")
-    c.execute("SELECT COUNT(*) FROM cuzdan")
-    if c.fetchone()[0] == 0:
+def cuzdan_tek_satir_yap(c, reset=False):
+    """Cuzdan tablosunu tek satira indir; reset=True ise $ILK_BAKIYE."""
+    c.execute("SELECT id, bakiye FROM cuzdan ORDER BY id ASC")
+    rows = c.fetchall()
+    if not rows:
         c.execute("INSERT INTO cuzdan (bakiye, guncelleme) VALUES (?, ?)",
                   (ILK_BAKIYE, datetime.now().isoformat()))
-    c.execute("""CREATE TABLE IF NOT EXISTS islemler (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        coin TEXT, yon TEXT, giris_fiyati REAL,
-        hedef_r1 REAL, stop_loss REAL, orjinal_stop REAL,
-        marjin REAL DEFAULT 15.0, kaldirac INTEGER DEFAULT 5,
-        pozisyon_usd REAL DEFAULT 75.0, risk_usd REAL DEFAULT 10.0,
-        durum TEXT, kâr_r REAL DEFAULT 0.0, kâr_usd REAL DEFAULT 0.0,
-        is_be INTEGER DEFAULT 0, tarih TEXT, skor REAL DEFAULT 0.0,
-        grafik_dosya TEXT DEFAULT '', mod TEXT DEFAULT 'IZOLE')""")
-    try:
-        c.execute("ALTER TABLE islemler ADD COLUMN risk_usd REAL DEFAULT 10.0")
-    except Exception:
-        pass
-    try:
-        c.execute("ALTER TABLE islemler ADD COLUMN grafik_dosya TEXT DEFAULT ''")
-    except Exception:
-        pass
-    try:
-        c.execute("ALTER TABLE islemler ADD COLUMN mod TEXT DEFAULT 'IZOLE'")
-    except Exception:
-        pass
-    conn.commit()
-    conn.close()
+        return ILK_BAKIYE
+    bakiye = float(rows[-1][1]) if rows[-1][1] is not None else ILK_BAKIYE
+    if reset:
+        bakiye = ILK_BAKIYE
+    # tek satir birak
+    c.execute("DELETE FROM cuzdan")
+    c.execute("INSERT INTO cuzdan (id, bakiye, guncelleme) VALUES (1, ?, ?)",
+              (bakiye, datetime.now().isoformat()))
+    return bakiye
+
+
+def db_kurulum():
+    with _db_lock:
+        conn, c = db_baglanti()
+        c.execute("""CREATE TABLE IF NOT EXISTS cuzdan (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, bakiye REAL DEFAULT 1000.0, guncelleme TEXT)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS islemler (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            coin TEXT, yon TEXT, giris_fiyati REAL,
+            hedef_r1 REAL, stop_loss REAL, orjinal_stop REAL,
+            marjin REAL DEFAULT 15.0, kaldirac INTEGER DEFAULT 5,
+            pozisyon_usd REAL DEFAULT 75.0, risk_usd REAL DEFAULT 10.0,
+            durum TEXT, kâr_r REAL DEFAULT 0.0, kâr_usd REAL DEFAULT 0.0,
+            is_be INTEGER DEFAULT 0, tarih TEXT, skor REAL DEFAULT 0.0,
+            grafik_dosya TEXT DEFAULT '', mod TEXT DEFAULT 'IZOLE')""")
+        for col, typ in [
+            ("risk_usd", "REAL DEFAULT 10.0"),
+            ("grafik_dosya", "TEXT DEFAULT ''"),
+            ("mod", "TEXT DEFAULT 'IZOLE'"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE islemler ADD COLUMN {col} {typ}")
+            except Exception:
+                pass
+
+        reset = os.environ.get("RESET_WALLET", "").lower() in ("1", "true", "yes")
+        bakiye = cuzdan_tek_satir_yap(c, reset=reset)
+
+        # Ayni coinde birden fazla ACIK varsa eskileri kapat
+        c.execute("""
+            UPDATE islemler SET durum='IPTAL'
+            WHERE durum='ACIK' AND id NOT IN (
+                SELECT MAX(id) FROM islemler WHERE durum='ACIK' GROUP BY coin
+            )
+        """)
+        conn.commit()
+        conn.close()
+        if reset:
+            print(f"[DB] Cuzdan sifirlandi: ${ILK_BAKIYE:.2f}")
+        else:
+            print(f"[DB] Cuzdan: ${bakiye:.2f} (tek satir)")
 
 
 def acik_pozisyon_var_mi(coin):
-    conn, c = db_baglanti()
-    c.execute("SELECT id FROM islemler WHERE coin=? AND durum='ACIK'", (coin,))
-    row = c.fetchone()
-    conn.close()
-    return row is not None
+    with _db_lock:
+        conn, c = db_baglanti()
+        c.execute("SELECT id FROM islemler WHERE coin=? AND durum='ACIK' LIMIT 1", (coin,))
+        row = c.fetchone()
+        conn.close()
+        return row is not None
 
 
 def islem_kaydet(coin, yon, giris, stop, hedef, skor=0.0, grafik_dosya=""):
-    if acik_pozisyon_var_mi(coin):
-        return False
-    tarih = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    conn, c = db_baglanti()
-    c.execute("""INSERT INTO islemler
-        (coin, yon, giris_fiyati, hedef_r1, stop_loss, orjinal_stop,
-         marjin, kaldirac, pozisyon_usd, risk_usd, durum, tarih, skor, grafik_dosya, mod)
-        VALUES (?,?,?,?,?,?,?,?,?,?,'ACIK',?,?,?,'IZOLE')""",
-              (coin, yon, giris, hedef, stop, stop,
-               MARJIN_USD, KALDIRAC, POZISYON_USD, RISK_USD,
-               tarih, skor, grafik_dosya or ""))
-    conn.commit()
-    conn.close()
-    return True
+    with _db_lock:
+        conn, c = db_baglanti()
+        c.execute("SELECT id FROM islemler WHERE coin=? AND durum='ACIK' LIMIT 1", (coin,))
+        if c.fetchone():
+            conn.close()
+            return False
+        tarih = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        c.execute("""INSERT INTO islemler
+            (coin, yon, giris_fiyati, hedef_r1, stop_loss, orjinal_stop,
+             marjin, kaldirac, pozisyon_usd, risk_usd, durum, tarih, skor, grafik_dosya, mod)
+            VALUES (?,?,?,?,?,?,?,?,?,?,'ACIK',?,?,?,'IZOLE')""",
+                  (coin, yon, giris, hedef, stop, stop,
+                   MARJIN_USD, KALDIRAC, POZISYON_USD, RISK_USD,
+                   tarih, skor, grafik_dosya or ""))
+        conn.commit()
+        conn.close()
+        return True
 
 
 def bakiye_guncelle(pnl_usd: float):
-    conn, c = db_baglanti()
-    c.execute("SELECT bakiye FROM cuzdan ORDER BY id DESC LIMIT 1")
-    row = c.fetchone()
-    mevcut = row[0] if row else ILK_BAKIYE
-    yeni = mevcut + pnl_usd
-    c.execute("UPDATE cuzdan SET bakiye=?, guncelleme=? WHERE id=(SELECT MAX(id) FROM cuzdan)",
-              (yeni, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
-    return yeni
+    with _db_lock:
+        conn, c = db_baglanti()
+        c.execute("SELECT bakiye FROM cuzdan WHERE id=1")
+        row = c.fetchone()
+        if not row:
+            cuzdan_tek_satir_yap(c, reset=False)
+            c.execute("SELECT bakiye FROM cuzdan WHERE id=1")
+            row = c.fetchone()
+        mevcut = float(row[0]) if row else ILK_BAKIYE
+        yeni = mevcut + float(pnl_usd)
+        c.execute("UPDATE cuzdan SET bakiye=?, guncelleme=? WHERE id=1",
+                  (yeni, datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+        return yeni
 
 
 def acik_pozisyonlari_listele():
-    conn, c = db_baglanti()
-    c.execute("""SELECT coin, yon, giris_fiyati, stop_loss, hedef_r1, tarih, skor,
-                        grafik_dosya, marjin, kaldirac, risk_usd
-                 FROM islemler WHERE durum='ACIK' ORDER BY id DESC""")
-    rows = c.fetchall()
-    conn.close()
-    return rows
+    with _db_lock:
+        conn, c = db_baglanti()
+        c.execute("""SELECT coin, yon, giris_fiyati, stop_loss, hedef_r1, tarih, skor,
+                            grafik_dosya, marjin, kaldirac, risk_usd
+                     FROM islemler WHERE durum='ACIK' ORDER BY id DESC""")
+        rows = c.fetchall()
+        conn.close()
+        return rows
 
 
 def bakiye_oku():
-    conn, c = db_baglanti()
-    c.execute("SELECT bakiye FROM cuzdan ORDER BY id DESC LIMIT 1")
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else ILK_BAKIYE
+    with _db_lock:
+        conn, c = db_baglanti()
+        c.execute("SELECT bakiye FROM cuzdan WHERE id=1")
+        row = c.fetchone()
+        if not row:
+            cuzdan_tek_satir_yap(c, reset=False)
+            conn.commit()
+            c.execute("SELECT bakiye FROM cuzdan WHERE id=1")
+            row = c.fetchone()
+        conn.close()
+        return float(row[0]) if row else ILK_BAKIYE
 
 
 def telegram_mesaj(text):
@@ -1061,54 +1109,88 @@ def telegram_gonder(symbol, skor, fiyat, df, yon, info):
 
 
 def acik_islemleri_kontrol(guncel_fiyatlar: dict):
-    conn, c = db_baglanti()
-    c.execute("""SELECT id, coin, yon, giris_fiyati, hedef_r1, stop_loss, orjinal_stop,
-                        is_be, marjin, grafik_dosya
-                 FROM islemler WHERE durum='ACIK'""")
-    rows = c.fetchall()
-    for row in rows:
-        islem_id, coin, yon, giris, hedef, stop, orj_stop, is_be, marjin, grafik = row
-        if coin not in guncel_fiyatlar:
-            continue
-        anlik = guncel_fiyatlar[coin]
-        risk_px = abs(giris - (orj_stop or stop))
-        if risk_px <= 0:
-            continue
-        mevcut_r = (anlik - giris) / risk_px if yon == "LONG" else (giris - anlik) / risk_px
-        dosya_notu = f"\n📎 {grafik or DOSYA_ADI}"
+    """TP/SL/BE kontrol — her olay bir kez, cuzdan tek satir."""
+    bildirimler = []  # (mesaj, pnl) — pnl None ise sadece bilgi
 
-        if mevcut_r >= 1.0 and is_be == 0:
-            c.execute("UPDATE islemler SET stop_loss=?, is_be=1 WHERE id=?", (giris, islem_id))
-            telegram_mesaj(f"🛡 <b>{coin}</b> BE (stop girişe){dosya_notu}")
+    with _db_lock:
+        conn, c = db_baglanti()
+        c.execute("""SELECT id, coin, yon, giris_fiyati, hedef_r1, stop_loss, orjinal_stop,
+                            is_be, marjin, grafik_dosya
+                     FROM islemler WHERE durum='ACIK'""")
+        rows = c.fetchall()
+        for row in rows:
+            islem_id, coin, yon, giris, hedef, stop, orj_stop, is_be, marjin, grafik = row
+            if coin not in guncel_fiyatlar:
+                continue
+            anlik = float(guncel_fiyatlar[coin])
+            giris = float(giris)
+            stop = float(stop)
+            hedef = float(hedef)
+            orj = float(orj_stop or stop)
+            risk_px = abs(giris - orj) or (giris * 0.01)
+            mevcut_r = (anlik - giris) / risk_px if yon == "LONG" else (giris - anlik) / risk_px
+            dosya_notu = f"\n📎 {grafik or DOSYA_ADI}\n📂 {DOSYA_ADI}"
+            is_be = int(is_be or 0)
 
-        if yon == "LONG":
-            if anlik >= hedef:
-                pnl = TP_USD
-                yeni = bakiye_guncelle(pnl)
-                telegram_mesaj(f"✅ <b>{coin} LONG TP 3R</b>\n+${pnl:.2f} | Cüzdan ${yeni:.2f}{dosya_notu}")
-                c.execute("UPDATE islemler SET durum='WIN', kâr_r=3.0, kâr_usd=? WHERE id=?", (pnl, islem_id))
-            elif anlik <= stop:
-                pnl = 0.0 if is_be else -RISK_USD
-                yeni = bakiye_guncelle(pnl)
-                durum = "BE" if is_be else "LOSS"
-                telegram_mesaj(f"{'🛡' if is_be else '❌'} <b>{coin} LONG</b> {durum}\n${pnl:+.2f} | Cüzdan ${yeni:.2f}{dosya_notu}")
-                c.execute("UPDATE islemler SET durum=?, kâr_r=?, kâr_usd=? WHERE id=?",
-                          (durum, 0.0 if is_be else -1.0, pnl, islem_id))
-        else:
-            if anlik <= hedef:
-                pnl = TP_USD
-                yeni = bakiye_guncelle(pnl)
-                telegram_mesaj(f"✅ <b>{coin} SHORT TP 3R</b>\n+${pnl:.2f} | Cüzdan ${yeni:.2f}{dosya_notu}")
-                c.execute("UPDATE islemler SET durum='WIN', kâr_r=3.0, kâr_usd=? WHERE id=?", (pnl, islem_id))
-            elif anlik >= stop:
-                pnl = 0.0 if is_be else -RISK_USD
-                yeni = bakiye_guncelle(pnl)
-                durum = "BE" if is_be else "LOSS"
-                telegram_mesaj(f"{'🛡' if is_be else '❌'} <b>{coin} SHORT</b> {durum}\n${pnl:+.2f} | Cüzdan ${yeni:.2f}{dosya_notu}")
-                c.execute("UPDATE islemler SET durum=?, kâr_r=?, kâr_usd=? WHERE id=?",
-                          (durum, 0.0 if is_be else -1.0, pnl, islem_id))
-    conn.commit()
-    conn.close()
+            # +1R → BE stop (yalnizca 1 kez)
+            if mevcut_r >= 1.0 and is_be == 0:
+                be_stop = giris * (0.9995 if yon == "LONG" else 1.0005)
+                c.execute(
+                    "UPDATE islemler SET stop_loss=?, is_be=1 WHERE id=? AND is_be=0 AND durum='ACIK'",
+                    (be_stop, islem_id),
+                )
+                if c.rowcount > 0:
+                    is_be = 1
+                    stop = be_stop
+                    bildirimler.append((
+                        f"🛡 <b>{coin}</b> BE aktif (stop girişe)\nStop: {be_stop:.6f}{dosya_notu}",
+                        None,
+                    ))
+
+            durum = None
+            pnl = 0.0
+            if yon == "LONG":
+                if anlik >= hedef:
+                    pnl, durum = TP_USD, "WIN"
+                elif anlik <= stop:
+                    pnl = 0.0 if is_be == 1 else -RISK_USD
+                    durum = "BE" if is_be == 1 else "LOSS"
+            else:
+                if anlik <= hedef:
+                    pnl, durum = TP_USD, "WIN"
+                elif anlik >= stop:
+                    pnl = 0.0 if is_be == 1 else -RISK_USD
+                    durum = "BE" if is_be == 1 else "LOSS"
+
+            if durum is None:
+                continue
+
+            c.execute(
+                "UPDATE islemler SET durum=?, kâr_r=?, kâr_usd=? WHERE id=? AND durum='ACIK'",
+                (durum, 3.0 if durum == "WIN" else (0.0 if durum == "BE" else -1.0), pnl, islem_id),
+            )
+            if c.rowcount == 0:
+                continue
+
+            if durum == "WIN":
+                emoji = "✅"
+            elif durum == "BE":
+                emoji = "🛡"
+            else:
+                emoji = "❌"
+            bildirimler.append((
+                f"{emoji} <b>{coin} {yon}</b> {durum}\n${pnl:+.2f}{{{{CUZDAN}}}}{dosya_notu}",
+                pnl,
+            ))
+
+        conn.commit()
+        conn.close()
+
+    for mesaj, pnl in bildirimler:
+        if pnl is not None:
+            yeni = bakiye_guncelle(pnl)
+            mesaj = mesaj.replace("{{CUZDAN}}", f" | Cüzdan ${yeni:.2f}")
+        telegram_mesaj(mesaj)
 
 
 def tam_tarama():
@@ -1151,16 +1233,17 @@ def tam_tarama():
 
 if __name__ == "__main__":
     acilis_mesaji_goster()
+    db_kurulum()
     telegram_mesaj(
-        f"🚀 <b>Vadeli Sanal Bot v16.5</b>\n\n"
+        f"🚀 <b>Vadeli Sanal Bot v16.6</b>\n\n"
         f"📂 Dosya: <code>{DOSYA_ADI}</code>\n"
-        f"💰 Cüzdan: <b>${ILK_BAKIYE:.0f}</b> | Marjin ${MARJIN_USD:.0f} İZOLE\n"
-        f"📌 <b>LONG</b> = SuperTrend AL + StochRSI aşırı satım (dip)\n"
-        f"📌 <b>SHORT</b> = SuperTrend SAT + StochRSI aşırı alım (tepe)\n"
-        f"⭐ Min skor: <b>{MIN_SKOR:.0f}</b> | Hacim ≥ %{int(VOLUME_MIN_RATIO*100)}\n"
-        f"🛡 SL/TP: ST + Fib | TF 1H | {len(HEDEF_COINLER)} coin\n"
-        f"📋 Saatlik raporda kâr/zarar zorunlu"
+        f"💰 Cüzdan: <b>${bakiye_oku():.2f}</b> (başlangıç ${ILK_BAKIYE:.0f})\n"
+        f"🔒 Marjin ${MARJIN_USD:.0f} İZOLE | Risk ${RISK_USD:.0f}\n"
+        f"📌 LONG = ST AL + StochRSI dip | SHORT = ST SAT + StochRSI tepe\n"
+        f"⭐ Min skor {MIN_SKOR:.0f} | BE spam düzeltildi | tek cüzdan\n"
+        f"📋 {len(HEDEF_COINLER)} SWAP | TF 1H"
     )
+
     # Sinyal beklemeden ornek grafik (Fib + Giris/SL/TP)
     try:
         test_grafik_gonder()
