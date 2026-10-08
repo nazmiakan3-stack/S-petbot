@@ -600,27 +600,55 @@ def telegram_mesaj(text):
         print(f"Mesaj hatasi: {e}")
 
 
+def grafik_yolu(grafik_adi):
+    """Grafik dosya adindan tam yol; yoksa None."""
+    if not grafik_adi:
+        return None
+    if os.path.isabs(grafik_adi) and os.path.exists(grafik_adi):
+        return grafik_adi
+    p = os.path.join(ARTIFACT_DIR, os.path.basename(grafik_adi))
+    if os.path.exists(p) and os.path.getsize(p) > 500:
+        return p
+    # alternatif: cwd artifacts
+    p2 = os.path.join("artifacts", os.path.basename(grafik_adi))
+    if os.path.exists(p2) and os.path.getsize(p2) > 500:
+        return p2
+    return None
+
+
 def telegram_foto(path, caption=""):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         if caption:
             print("[TG] Token yok:", caption[:120])
-        return
+        return False
+    path = grafik_yolu(path) if path and not (os.path.isabs(path) and os.path.exists(path)) else path
     if not path or not os.path.exists(path):
         if caption:
             telegram_mesaj(caption)
-        return
+        return False
     try:
         with open(path, "rb") as f:
-            requests.post(
+            r = requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
                 files={"photo": f},
-                data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000], "parse_mode": "HTML"},
-                timeout=30,
+                data={
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "caption": (caption or "")[:1024],
+                    "parse_mode": "HTML",
+                },
+                timeout=45,
             )
+        if r.status_code != 200:
+            print(f"Foto TG hata: {r.status_code} {r.text[:200]}")
+            if caption:
+                telegram_mesaj(caption)
+            return False
+        return True
     except Exception as e:
         print(f"Foto hatasi: {e}")
         if caption:
             telegram_mesaj(caption)
+        return False
 
 
 def saatlik_rapor_gonder(guncel_fiyatlar: dict):
@@ -859,15 +887,16 @@ def grafik_ciz(df, symbol, yon, skor, info=None, giris=None, stop=None, hedef=No
                 if ratio in fib_levels:
                     _hl(fib_levels[ratio], fib_colors[ratio], "--", 0.8)
 
+            # hlines: stil listesi bazi mplfinance surumlerinde hata verir → tek stil
             hlines = None
             if h_vals:
-                hlines = {
-                    "hlines": h_vals,
-                    "colors": h_cols,
-                    "linestyle": h_styles,
-                    "linewidths": h_widths,
-                    "alpha": 0.9,
-                }
+                hlines = dict(
+                    hlines=h_vals,
+                    colors=h_cols,
+                    linestyle="-",
+                    linewidths=h_widths,
+                    alpha=0.85,
+                )
 
             dosya_adi = f"{symbol.replace('-', '_')}_chart.png"
             dosya = os.path.join(ARTIFACT_DIR, dosya_adi)
@@ -882,15 +911,14 @@ def grafik_ciz(df, symbol, yon, skor, info=None, giris=None, stop=None, hedef=No
                 facecolor="white", gridstyle=":",
             )
 
-            # panel 0 = fiyat, panel 1 = RSI  → 2 panel
             kwargs = dict(
                 type="candle",
                 style=style,
-                title=f"{symbol} | {yon} | SuperTrend flip | Giriş/SL/TP",
+                title=f"{symbol} | {yon} | SuperTrend | Giriş/SL/TP",
                 returnfig=True,
                 volume=False,
-                figsize=(12, 8),
-                panel_ratios=(3.5, 1.2),
+                figsize=(12, 7),
+                panel_ratios=(3.2, 1.0),
                 tight_layout=True,
             )
             if addplots:
@@ -898,7 +926,13 @@ def grafik_ciz(df, symbol, yon, skor, info=None, giris=None, stop=None, hedef=No
             if hlines:
                 kwargs["hlines"] = hlines
 
-            fig, axes = mpf.plot(df_plot, **kwargs)
+            try:
+                fig, axes = mpf.plot(df_plot, **kwargs)
+            except Exception as plot_err:
+                print(f"mpf.plot hata, sade grafik: {plot_err}")
+                kwargs.pop("addplot", None)
+                kwargs.pop("hlines", None)
+                fig, axes = mpf.plot(df_plot, **kwargs)
             ax = axes[0] if isinstance(axes, (list, np.ndarray)) else axes
 
             ax.annotate(
@@ -1125,6 +1159,7 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
                         f"Stop: {be_stop:.6f}{dosya_notu}",
                         None,
                         coin,
+                        grafik,
                     ))
 
             durum = None
@@ -1164,24 +1199,33 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
                 f"💵 ${pnl:+.2f}{{{{CUZDAN}}}}{dosya_notu}",
                 pnl,
                 coin,
+                grafik,
             ))
 
         conn.commit()
         conn.close()
 
     now = datetime.now()
-    for mesaj, pnl, coin in bildirimler:
+    for item in bildirimler:
+        if len(item) == 4:
+            mesaj, pnl, coin, grafik = item
+        else:
+            mesaj, pnl, coin = item
+            grafik = None
         if pnl is not None:
             yeni = bakiye_guncelle(pnl)
             mesaj = mesaj.replace(
                 "{{CUZDAN}}",
                 f"\n💰 Cüzdan: <b>${yeni:.2f}</b>",
             )
-            # Kapanis sonrasi ayni coini uzun sure acma
             last_signal_time[coin] = now + timedelta(
                 minutes=POST_TRADE_COOLDOWN_MINUTES - SIGNAL_COOLDOWN_MINUTES
             )
-        telegram_mesaj(mesaj)
+        foto = grafik_yolu(grafik)
+        if foto:
+            telegram_foto(foto, mesaj)
+        else:
+            telegram_mesaj(mesaj)
 
 
 def tam_tarama():
