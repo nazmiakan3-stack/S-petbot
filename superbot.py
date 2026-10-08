@@ -60,7 +60,8 @@ TP_USD = 30.0              # TP kar (3R)
 KALDIRAC = 5
 POZISYON_USD = MARJIN_USD * KALDIRAC  # 75 USDT notional
 
-SIGNAL_COOLDOWN_MINUTES = 12
+SIGNAL_COOLDOWN_MINUTES = 45          # ayni coinde yeniden giris min
+POST_TRADE_COOLDOWN_MINUTES = 180     # TP/SL/BE sonrasi ayni coin 3 saat kapali
 HOURLY_REPORT_MINUTES = 60
 
 VOLUME_MA_LENGTH = 20
@@ -633,20 +634,60 @@ def saatlik_rapor_gonder(guncel_fiyatlar: dict):
     bakiye = bakiye_oku()
     kar_zarar = bakiye - ILK_BAKIYE
     kz_emoji = "🟢 KÂR" if kar_zarar >= 0 else "🔴 ZARAR"
+
+    # Bugunku kapali islem ozeti (+ grafik dosya adlari)
+    bugun = now.strftime("%Y-%m-%d")
+    win_n = loss_n = be_n = 0
+    win_usd = loss_usd = 0.0
+    kapanan_satirlar = []
+    with _db_lock:
+        conn, c = db_baglanti()
+        c.execute(
+            """SELECT coin, yon, durum, kâr_usd, grafik_dosya
+               FROM islemler
+               WHERE durum IN ('WIN','LOSS','BE') AND tarih LIKE ?
+               ORDER BY id DESC LIMIT 15""",
+            (bugun + "%",),
+        )
+        for coin, yon, durum, kusd, grafik in c.fetchall():
+            kusd = float(kusd or 0)
+            if durum == "WIN":
+                win_n += 1
+                win_usd += kusd
+                em = "✅"
+            elif durum == "LOSS":
+                loss_n += 1
+                loss_usd += kusd
+                em = "❌"
+            else:
+                be_n += 1
+                em = "🛡"
+            kapanan_satirlar.append(
+                f"{em} {coin} {yon} {durum} ${kusd:+.2f}\n"
+                f"   📎 <code>{grafik or 'Yok'}</code>"
+            )
+        conn.close()
+
     mesaj = (
         f"📋 <b>VADELİ SAATLİK RAPOR</b>\n"
         f"🕒 {now.strftime('%Y-%m-%d %H:%M')}\n"
-        f"📂 Dosya: <code>{DOSYA_ADI}</code>\n"
+        f"📂 <b>Dosya adı:</b> <code>{DOSYA_ADI}</code>\n"
         f"💰 Cüzdan: <b>${bakiye:.2f}</b> / ${ILK_BAKIYE:.0f}\n"
         f"{kz_emoji}: <b>${kar_zarar:+.2f}</b> "
         f"(%{(kar_zarar / ILK_BAKIYE * 100):+.2f})\n"
-        f"🔒 Marjin ${MARJIN_USD:.0f} İZOLE | Risk ${RISK_USD:.0f}\n"
-        f"📌 Strateji: ST AL/SAT + StochRSI dip/tepe | Skor≥{MIN_SKOR:.0f}\n\n"
+        f"🔒 Marjin ${MARJIN_USD:.0f} | Risk ${RISK_USD:.0f}\n\n"
+        f"<b>Bugün kapanan özet:</b>\n"
+        f"✅ WIN {win_n} → ${win_usd:+.2f}\n"
+        f"❌ LOSS {loss_n} → ${loss_usd:+.2f}\n"
+        f"🛡 BE {be_n}\n"
+        f"📊 Net kapanan: <b>${win_usd + loss_usd:+.2f}</b>\n"
     )
+    if kapanan_satirlar:
+        mesaj += "\n<b>Son kapananlar:</b>\n" + "\n".join(kapanan_satirlar[:10]) + "\n"
     if not pozisyonlar:
-        mesaj += "Açık pozisyon yok.\n"
+        mesaj += "\nAçık pozisyon yok.\n"
     else:
-        mesaj += f"<b>Açık ({len(pozisyonlar)}):</b>\n"
+        mesaj += f"\n<b>Açık ({len(pozisyonlar)}):</b>\n"
         toplam = 0.0
         for row in pozisyonlar:
             coin, yon, giris, stop, hedef, tarih, skor, grafik, marjin, kaldirac, risk = row
@@ -664,14 +705,16 @@ def saatlik_rapor_gonder(guncel_fiyatlar: dict):
                 f"\n• <b>{coin}</b> {yon}\n"
                 f"  Giriş {giris:.6f} | Anlık {anlik:.6f}\n"
                 f"  {emoji} <b>{durum}</b>: ${pnl_usd:+.2f} ({r_mult:+.2f}R)\n"
-                f"  📎 <code>{grafik or 'Yok'}</code>\n"
+                f"  📂 Dosya: <code>{DOSYA_ADI}</code>\n"
+                f"  📎 Grafik: <code>{grafik or 'Yok'}</code>\n"
             )
         td = "KÂR" if toplam >= 0 else "ZARAR"
         mesaj += (
             f"\n────────────────\n"
-            f"📊 Açık pozisyonlar toplam <b>{td}</b>: <b>${toplam:+.2f}</b>\n"
-            f"💼 Cüzdan net <b>{kz_emoji}</b>: <b>${kar_zarar:+.2f}</b>\n"
+            f"📊 Açık toplam <b>{td}</b>: <b>${toplam:+.2f}</b>\n"
+            f"💼 Cüzdan net: <b>${kar_zarar:+.2f}</b>\n"
         )
+    mesaj += f"\n📂 <b>Rapor kaynağı:</b> <code>{DOSYA_ADI}</code>"
     telegram_mesaj(mesaj)
 
 
@@ -991,6 +1034,21 @@ def telegram_gonder(symbol, skor, fiyat, df, yon, info):
         yon, fiyat, atr, st_line, fib_levels, swing_hi, swing_lo
     )
 
+    # Fiyat zaten TP veya SL'de ise acma (aninda WIN/LOSS spam engeli)
+    if yon == "LONG":
+        if fiyat >= hedef or fiyat <= stop:
+            print(f"Atlandi {symbol}: fiyat zaten TP/SL bolgesinde")
+            return
+    else:
+        if fiyat <= hedef or fiyat >= stop:
+            print(f"Atlandi {symbol}: fiyat zaten TP/SL bolgesinde")
+            return
+    # TP mesafesi en az 0.5R olsun
+    risk_px = abs(fiyat - stop) or (fiyat * 0.01)
+    if abs(hedef - fiyat) < risk_px * 0.8:
+        print(f"Atlandi {symbol}: TP cok yakin")
+        return
+
     dosya_adi = f"{symbol.replace('-', '_')}_chart.png"
     foto = grafik_ciz(df, symbol, yon, skor, info, giris=fiyat, stop=stop, hedef=hedef)
     if foto:
@@ -1026,8 +1084,8 @@ def telegram_gonder(symbol, skor, fiyat, df, yon, info):
 
 
 def acik_islemleri_kontrol(guncel_fiyatlar: dict):
-    """TP/SL/BE kontrol — her olay bir kez, cuzdan tek satir."""
-    bildirimler = []  # (mesaj, pnl) — pnl None ise sadece bilgi
+    """TP/SL/BE — her pozisyon yalnizca 1 kez kapanir; sonra coin cooldown."""
+    bildirimler = []  # (mesaj, pnl, coin)
 
     with _db_lock:
         conn, c = db_baglanti()
@@ -1046,7 +1104,10 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
             orj = float(orj_stop or stop)
             risk_px = abs(giris - orj) or (giris * 0.01)
             mevcut_r = (anlik - giris) / risk_px if yon == "LONG" else (giris - anlik) / risk_px
-            dosya_notu = f"\n📎 {grafik or DOSYA_ADI}\n📂 {DOSYA_ADI}"
+            dosya_notu = (
+                f"\n📂 Dosya: <code>{DOSYA_ADI}</code>"
+                f"\n📎 Grafik: <code>{grafik or 'Yok'}</code>"
+            )
             is_be = int(is_be or 0)
 
             # +1R → BE stop (yalnizca 1 kez)
@@ -1060,8 +1121,10 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
                     is_be = 1
                     stop = be_stop
                     bildirimler.append((
-                        f"🛡 <b>{coin}</b> BE aktif (stop girişe)\nStop: {be_stop:.6f}{dosya_notu}",
+                        f"🛡 <b>{coin}</b> BE aktif (stop → giriş)\n"
+                        f"Stop: {be_stop:.6f}{dosya_notu}",
                         None,
+                        coin,
                     ))
 
             durum = None
@@ -1082,6 +1145,7 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
             if durum is None:
                 continue
 
+            # Atomik kapanis — durum ACIK degilse ikinci kez islenmez
             c.execute(
                 "UPDATE islemler SET durum=?, kâr_r=?, kâr_usd=? WHERE id=? AND durum='ACIK'",
                 (durum, 3.0 if durum == "WIN" else (0.0 if durum == "BE" else -1.0), pnl, islem_id),
@@ -1090,23 +1154,33 @@ def acik_islemleri_kontrol(guncel_fiyatlar: dict):
                 continue
 
             if durum == "WIN":
-                emoji = "✅"
+                emoji, kz = "✅", "KÂR"
             elif durum == "BE":
-                emoji = "🛡"
+                emoji, kz = "🛡", "BAŞABAŞ"
             else:
-                emoji = "❌"
+                emoji, kz = "❌", "ZARAR"
             bildirimler.append((
-                f"{emoji} <b>{coin} {yon}</b> {durum}\n${pnl:+.2f}{{{{CUZDAN}}}}{dosya_notu}",
+                f"{emoji} <b>{coin} {yon}</b> — <b>{durum}</b> ({kz})\n"
+                f"💵 ${pnl:+.2f}{{{{CUZDAN}}}}{dosya_notu}",
                 pnl,
+                coin,
             ))
 
         conn.commit()
         conn.close()
 
-    for mesaj, pnl in bildirimler:
+    now = datetime.now()
+    for mesaj, pnl, coin in bildirimler:
         if pnl is not None:
             yeni = bakiye_guncelle(pnl)
-            mesaj = mesaj.replace("{{CUZDAN}}", f" | Cüzdan ${yeni:.2f}")
+            mesaj = mesaj.replace(
+                "{{CUZDAN}}",
+                f"\n💰 Cüzdan: <b>${yeni:.2f}</b>",
+            )
+            # Kapanis sonrasi ayni coini uzun sure acma
+            last_signal_time[coin] = now + timedelta(
+                minutes=POST_TRADE_COOLDOWN_MINUTES - SIGNAL_COOLDOWN_MINUTES
+            )
         telegram_mesaj(mesaj)
 
 
@@ -1152,7 +1226,7 @@ if __name__ == "__main__":
     acilis_mesaji_goster()
     db_kurulum()
     telegram_mesaj(
-        f"🚀 <b>Vadeli Sanal Bot v16.7</b>\n\n"
+        f"🚀 <b>Vadeli Sanal Bot v16.8</b>\n\n"
         f"📂 Dosya: <code>{DOSYA_ADI}</code>\n"
         f"💰 Cüzdan: <b>${bakiye_oku():.2f}</b> (başlangıç ${ILK_BAKIYE:.0f})\n"
         f"🔒 Marjin ${MARJIN_USD:.0f} İZOLE | Risk ${RISK_USD:.0f}\n"
